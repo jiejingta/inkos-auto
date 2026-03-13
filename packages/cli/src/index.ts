@@ -15,6 +15,7 @@ import { draftCommand } from "./commands/draft.js";
 import { auditCommand } from "./commands/audit.js";
 import { reviseCommand } from "./commands/revise.js";
 import { agentCommand } from "./commands/agent.js";
+import { genreCommand } from "./commands/genre.js";
 
 const program = new Command();
 
@@ -38,5 +39,6 @@ program.addCommand(draftCommand);
 program.addCommand(auditCommand);
 program.addCommand(reviseCommand);
 program.addCommand(agentCommand);
+program.addCommand(genreCommand);
 
 program.parse();

@@ -1,11 +1,12 @@
 import { Command } from "commander";
-import { PipelineRunner } from "@actalk/inkos-core";
+import { PipelineRunner, type ReviseMode } from "@actalk/inkos-core";
 import { loadConfig, createClient, findProjectRoot, log, logError } from "../utils.js";
 
 export const reviseCommand = new Command("revise")
   .description("Revise a chapter based on audit issues")
   .argument("<book-id>", "Book ID")
   .argument("[chapter]", "Chapter number (defaults to latest)")
+  .option("--mode <mode>", "Revise mode: polish, rewrite, rework", "rewrite")
   .option("--json", "Output JSON")
   .action(async (bookId: string, chapterStr: string | undefined, opts) => {
     try {
@@ -20,9 +21,10 @@ export const reviseCommand = new Command("revise")
       });
 
       const chapterNumber = chapterStr ? parseInt(chapterStr, 10) : undefined;
-      if (!opts.json) log(`Revising "${bookId}"${chapterNumber ? ` chapter ${chapterNumber}` : " (latest)"}...`);
+      const mode = opts.mode as ReviseMode;
+      if (!opts.json) log(`Revising "${bookId}"${chapterNumber ? ` chapter ${chapterNumber}` : " (latest)"} [mode: ${mode}]...`);
 
-      const result = await pipeline.reviseDraft(bookId, chapterNumber);
+      const result = await pipeline.reviseDraft(bookId, chapterNumber, mode);
 
       if (opts.json) {
         log(JSON.stringify(result, null, 2));

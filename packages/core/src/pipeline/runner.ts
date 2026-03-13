@@ -2,12 +2,14 @@ import type OpenAI from "openai";
 import type { BookConfig } from "../models/book.js";
 import type { ChapterMeta } from "../models/chapter.js";
 import type { NotifyChannel } from "../models/project.js";
+import type { GenreProfile } from "../models/genre-profile.js";
 import { ArchitectAgent } from "../agents/architect.js";
 import { WriterAgent } from "../agents/writer.js";
 import { ContinuityAuditor } from "../agents/continuity.js";
-import { ReviserAgent } from "../agents/reviser.js";
+import { ReviserAgent, type ReviseMode } from "../agents/reviser.js";
 import { RadarAgent } from "../agents/radar.js";
 import type { RadarSource } from "../agents/radar-source.js";
+import { readGenreProfile } from "../agents/rules-reader.js";
 import { StateManager } from "../state/manager.js";
 import { dispatchNotification } from "../notify/dispatcher.js";
 import type { AgentContext } from "../agents/base.js";
@@ -54,7 +56,7 @@ export interface TruthFiles {
   readonly pendingHooks: string;
   readonly storyBible: string;
   readonly volumeOutline: string;
-  readonly styleGuide: string;
+  readonly bookRules: string;
 }
 
 export interface BookStatusInfo {
@@ -87,6 +89,11 @@ export class PipelineRunner {
     };
   }
 
+  private async loadGenreProfile(genre: string): Promise<{ profile: GenreProfile }> {
+    const parsed = await readGenreProfile(this.config.projectRoot, genre);
+    return { profile: parsed.profile };
+  }
+
   // ---------------------------------------------------------------------------
   // Atomic operations (composable by OpenClaw or agent mode)
   // ---------------------------------------------------------------------------
@@ -102,8 +109,9 @@ export class PipelineRunner {
 
     await this.state.saveBookConfig(book.id, book);
 
+    const { profile: gp } = await this.loadGenreProfile(book.genre);
     const foundation = await architect.generateFoundation(book, this.config.externalContext);
-    await architect.writeFoundationFiles(bookDir, foundation);
+    await architect.writeFoundationFiles(bookDir, foundation, gp.numericalSystem);
     await this.state.saveChapterIndex(book.id, []);
   }
 
@@ -114,6 +122,8 @@ export class PipelineRunner {
       const book = await this.state.loadBookConfig(bookId);
       const bookDir = this.state.bookDir(bookId);
       const chapterNumber = await this.state.getNextChapterNumber(bookId);
+
+      const { profile: gp } = await this.loadGenreProfile(book.genre);
 
       const writer = new WriterAgent(this.agentCtx(bookId));
       const output = await writer.writeChapter({
@@ -133,7 +143,7 @@ export class PipelineRunner {
       await writeFile(filePath, `# 第${chapterNumber}章 ${output.title}\n\n${output.content}`, "utf-8");
 
       // Save truth files
-      await writer.saveChapter(bookDir, output);
+      await writer.saveChapter(bookDir, output, gp.numericalSystem);
 
       // Update index
       const existingIndex = await this.state.loadChapterIndex(bookId);
@@ -160,6 +170,7 @@ export class PipelineRunner {
 
   /** Audit the latest (or specified) chapter. Read-only, no lock needed. */
   async auditDraft(bookId: string, chapterNumber?: number): Promise<AuditResult & { readonly chapterNumber: number }> {
+    const book = await this.state.loadBookConfig(bookId);
     const bookDir = this.state.bookDir(bookId);
     const targetChapter = chapterNumber ?? (await this.state.getNextChapterNumber(bookId)) - 1;
     if (targetChapter < 1) {
@@ -168,7 +179,7 @@ export class PipelineRunner {
 
     const content = await this.readChapterContent(bookDir, targetChapter);
     const auditor = new ContinuityAuditor(this.agentCtx(bookId));
-    const result = await auditor.auditChapter(bookDir, content, targetChapter);
+    const result = await auditor.auditChapter(bookDir, content, targetChapter, book.genre);
 
     // Update index with audit result
     const index = await this.state.loadChapterIndex(bookId);
@@ -188,9 +199,10 @@ export class PipelineRunner {
   }
 
   /** Revise the latest (or specified) chapter based on audit issues. */
-  async reviseDraft(bookId: string, chapterNumber?: number): Promise<ReviseResult> {
+  async reviseDraft(bookId: string, chapterNumber?: number, mode: ReviseMode = "rewrite"): Promise<ReviseResult> {
     const releaseLock = await this.state.acquireBookLock(bookId);
     try {
+      const book = await this.state.loadBookConfig(bookId);
       const bookDir = this.state.bookDir(bookId);
       const targetChapter = chapterNumber ?? (await this.state.getNextChapterNumber(bookId)) - 1;
       if (targetChapter < 1) {
@@ -207,14 +219,18 @@ export class PipelineRunner {
       // Re-audit to get structured issues (index only stores strings)
       const content = await this.readChapterContent(bookDir, targetChapter);
       const auditor = new ContinuityAuditor(this.agentCtx(bookId));
-      const auditResult = await auditor.auditChapter(bookDir, content, targetChapter);
+      const auditResult = await auditor.auditChapter(bookDir, content, targetChapter, book.genre);
 
       if (auditResult.passed) {
         return { chapterNumber: targetChapter, wordCount: content.length, fixedIssues: ["No issues to fix"] };
       }
 
+      const { profile: gp } = await this.loadGenreProfile(book.genre);
+
       const reviser = new ReviserAgent(this.agentCtx(bookId));
-      const reviseOutput = await reviser.reviseChapter(bookDir, content, targetChapter, auditResult.issues);
+      const reviseOutput = await reviser.reviseChapter(
+        bookDir, content, targetChapter, auditResult.issues, mode, book.genre,
+      );
 
       if (reviseOutput.revisedContent.length === 0) {
         throw new Error("Reviser returned empty content");
@@ -238,7 +254,7 @@ export class PipelineRunner {
       if (reviseOutput.updatedState !== "(状态卡未更新)") {
         await writeFile(join(storyDir, "current_state.md"), reviseOutput.updatedState, "utf-8");
       }
-      if (reviseOutput.updatedLedger !== "(账本未更新)") {
+      if (gp.numericalSystem && reviseOutput.updatedLedger && reviseOutput.updatedLedger !== "(账本未更新)") {
         await writeFile(join(storyDir, "particle_ledger.md"), reviseOutput.updatedLedger, "utf-8");
       }
       if (reviseOutput.updatedHooks !== "(伏笔池未更新)") {
@@ -283,17 +299,17 @@ export class PipelineRunner {
       }
     };
 
-    const [currentState, particleLedger, pendingHooks, storyBible, volumeOutline, styleGuide] =
+    const [currentState, particleLedger, pendingHooks, storyBible, volumeOutline, bookRules] =
       await Promise.all([
         readSafe(join(storyDir, "current_state.md")),
         readSafe(join(storyDir, "particle_ledger.md")),
         readSafe(join(storyDir, "pending_hooks.md")),
         readSafe(join(storyDir, "story_bible.md")),
         readSafe(join(storyDir, "volume_outline.md")),
-        readSafe(join(storyDir, "style_guide.md")),
+        readSafe(join(storyDir, "book_rules.md")),
       ]);
 
-    return { currentState, particleLedger, pendingHooks, storyBible, volumeOutline, styleGuide };
+    return { currentState, particleLedger, pendingHooks, storyBible, volumeOutline, bookRules };
   }
 
   /** Get book status overview. */
@@ -333,6 +349,7 @@ export class PipelineRunner {
     const book = await this.state.loadBookConfig(bookId);
     const bookDir = this.state.bookDir(bookId);
     const chapterNumber = await this.state.getNextChapterNumber(bookId);
+    const { profile: gp } = await this.loadGenreProfile(book.genre);
 
     // 1. Write chapter
     const writer = new WriterAgent(this.agentCtx(bookId));
@@ -349,6 +366,7 @@ export class PipelineRunner {
       bookDir,
       output.content,
       chapterNumber,
+      book.genre,
     );
 
     let finalContent = output.content;
@@ -367,6 +385,8 @@ export class PipelineRunner {
           output.content,
           chapterNumber,
           auditResult.issues,
+          "rewrite",
+          book.genre,
         );
 
         if (reviseOutput.revisedContent.length > 0) {
@@ -379,6 +399,7 @@ export class PipelineRunner {
             bookDir,
             finalContent,
             chapterNumber,
+            book.genre,
           );
 
           // Update state files from revision
@@ -386,7 +407,7 @@ export class PipelineRunner {
           if (reviseOutput.updatedState !== "(状态卡未更新)") {
             await writeFile(join(storyDir, "current_state.md"), reviseOutput.updatedState, "utf-8");
           }
-          if (reviseOutput.updatedLedger !== "(账本未更新)") {
+          if (gp.numericalSystem && reviseOutput.updatedLedger && reviseOutput.updatedLedger !== "(账本未更新)") {
             await writeFile(join(storyDir, "particle_ledger.md"), reviseOutput.updatedLedger, "utf-8");
           }
           if (reviseOutput.updatedHooks !== "(伏笔池未更新)") {
@@ -410,7 +431,7 @@ export class PipelineRunner {
 
     // Save original state files if not revised
     if (!revised) {
-      await writer.saveChapter(bookDir, output);
+      await writer.saveChapter(bookDir, output, gp.numericalSystem);
     }
 
     // 5. Update chapter index

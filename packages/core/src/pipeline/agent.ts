@@ -1,6 +1,7 @@
 import type OpenAI from "openai";
 import { PipelineRunner, type PipelineConfig } from "./runner.js";
 import type { Platform, Genre } from "../models/book.js";
+import type { ReviseMode } from "../agents/reviser.js";
 
 /** Tool definitions for the agent loop (OpenAI function calling format). */
 const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
@@ -38,12 +39,13 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     type: "function",
     function: {
       name: "revise_chapter",
-      description: "修订指定章节。根据审计问题做最小幅度修正。",
+      description: "修订指定章节。根据审计问题修正。支持三种模式：polish(润色)、rewrite(改写)、rework(重写)。",
       parameters: {
         type: "object",
         properties: {
           bookId: { type: "string", description: "书籍ID" },
           chapterNumber: { type: "number", description: "章节号（不填则修订最新章）" },
+          mode: { type: "string", enum: ["polish", "rewrite", "rework"], description: "修订模式（默认rewrite）" },
         },
         required: ["bookId"],
       },
@@ -95,7 +97,7 @@ const TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
     type: "function",
     function: {
       name: "read_truth_files",
-      description: "读取书籍的三大真相文件（状态卡、资源账本、伏笔池）+ 世界观和卷纲。",
+      description: "读取书籍的长期记忆（状态卡、资源账本、伏笔池）+ 世界观和卷纲。",
       parameters: {
         type: "object",
         properties: {
@@ -152,22 +154,40 @@ export async function runAgentLoop(
   const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
     {
       role: "system",
-      content: `你是 InkOS 的智能编排 agent。你可以调用工具来管理网文创作的全流程。
+      content: `你是 InkOS 小说写作 Agent。用户是小说作者，你帮他管理从建书到成稿的全过程。
 
-你的能力：
-- 扫描市场趋势（scan_market）
-- 创建新书（create_book）
-- 写草稿（write_draft）
-- 审计章节（audit_chapter）
-- 修订章节（revise_chapter）
-- 查看书籍状态（get_book_status）
-- 读取真相文件（read_truth_files）
-- 列出所有书（list_books）
-- 一键完整管线（write_full_pipeline）
+## 工具
 
-根据用户的自然语言指令，自主决定调用哪些工具、什么顺序。
-如果用户只给了题材或创意但没有明确要扫描市场，直接跳过雷达，用用户提供的信息创建书籍。
-每完成一步，简要汇报进展。`,
+| 工具 | 作用 |
+|------|------|
+| list_books | 列出所有书 |
+| get_book_status | 查看书的章数、字数、审计状态 |
+| read_truth_files | 读取长期记忆（状态卡、资源账本、伏笔池）和设定（世界观、卷纲、本书规则） |
+| create_book | 建书，生成世界观、卷纲、本书规则（自动加载题材 genre profile） |
+| write_draft | 写一章草稿（自动加载 genre profile + book_rules） |
+| audit_chapter | 审计章节（18维度，按题材条件启用） |
+| revise_chapter | 修订章节（支持 polish/rewrite/rework 三种模式） |
+| write_full_pipeline | 完整管线：写 → 审 → 改（如需要） |
+| scan_market | 扫描平台排行榜，分析市场趋势 |
+
+## 长期记忆
+
+每本书有三个长期记忆文件，是 Agent 写作和审计的事实依据：
+- **current_state.md** — 角色位置、关系、已知信息、当前冲突
+- **particle_ledger.md** — 物品/资源账本，每笔增减有据可查
+- **pending_hooks.md** — 已埋伏笔、推进状态、预期回收时机
+
+## 管线逻辑
+
+- audit 返回 passed=true → 不需要 revise
+- audit 返回 passed=false 且有 critical → 调 revise，改完可以再 audit
+- write_full_pipeline 会自动走完 写→审→改，适合不需要中间干预的场景
+
+## 规则
+
+- 用户提供了题材/创意但没说要扫描市场 → 跳过 scan_market，直接 create_book
+- 用户说了书名/bookId → 直接操作，不需要先 list_books
+- 每完成一步，简要汇报进展`,
     },
     { role: "user", content: instruction },
   ];
@@ -298,6 +318,7 @@ async function executeTool(
       const result = await pipeline.reviseDraft(
         args.bookId as string,
         args.chapterNumber as number | undefined,
+        (args.mode as ReviseMode) ?? "rewrite",
       );
       return JSON.stringify(result);
     }
