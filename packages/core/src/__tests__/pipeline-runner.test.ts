@@ -132,6 +132,72 @@ describe("PipelineRunner", () => {
     vi.restoreAllMocks();
   });
 
+  it("does not reuse override clients when credential sources differ", () => {
+    const previousKeyA = process.env.TEST_KEY_A;
+    const previousKeyB = process.env.TEST_KEY_B;
+    process.env.TEST_KEY_A = "key-a";
+    process.env.TEST_KEY_B = "key-b";
+
+    try {
+      const runner = new PipelineRunner({
+        client: {
+          provider: "openai",
+          apiFormat: "chat",
+          stream: false,
+          defaults: {
+            temperature: 0.7,
+            maxTokens: 4096,
+            thinkingBudget: 0,
+          },
+        } as ConstructorParameters<typeof PipelineRunner>[0]["client"],
+        model: "base-model",
+        projectRoot: process.cwd(),
+        defaultLLMConfig: {
+          provider: "custom",
+          baseUrl: "https://base.example/v1",
+          apiKey: "base-key",
+          model: "base-model",
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0,
+          apiFormat: "chat",
+          stream: false,
+        },
+        modelOverrides: {
+          writer: {
+            model: "writer-model",
+            provider: "custom",
+            baseUrl: "https://shared.example/v1",
+            apiKeyEnv: "TEST_KEY_A",
+          },
+          auditor: {
+            model: "auditor-model",
+            provider: "custom",
+            baseUrl: "https://shared.example/v1",
+            apiKeyEnv: "TEST_KEY_B",
+          },
+        },
+      });
+
+      const resolveOverride = (
+        runner as unknown as {
+          resolveOverride: (agent: string) => { model: string; client: unknown };
+        }
+      ).resolveOverride.bind(runner);
+
+      const writerOverride = resolveOverride("writer");
+      const auditorOverride = resolveOverride("auditor");
+
+      expect(writerOverride.client).not.toBe(auditorOverride.client);
+    } finally {
+      if (previousKeyA === undefined) delete process.env.TEST_KEY_A;
+      else process.env.TEST_KEY_A = previousKeyA;
+
+      if (previousKeyB === undefined) delete process.env.TEST_KEY_B;
+      else process.env.TEST_KEY_B = previousKeyB;
+    }
+  });
+
   it("uses the latest revised content as the input for follow-up spot-fix revisions", async () => {
     const { root, runner, bookId } = await createRunnerFixture();
 

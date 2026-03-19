@@ -135,23 +135,35 @@ export class PipelineRunner {
     if (!override.baseUrl) {
       return { model: override.model, client: this.config.client };
     }
-    const cacheKey = `${override.baseUrl}:${override.provider ?? "custom"}`;
+    const base = this.config.defaultLLMConfig;
+    const provider = override.provider ?? base?.provider ?? "custom";
+    const apiKeySource = override.apiKeyEnv
+      ? `env:${override.apiKeyEnv}`
+      : `base:${base?.apiKey ?? ""}`;
+    const stream = override.stream ?? base?.stream ?? true;
+    const apiFormat = base?.apiFormat ?? "chat";
+    const cacheKey = [
+      provider,
+      override.baseUrl,
+      apiKeySource,
+      `stream:${stream}`,
+      `format:${apiFormat}`,
+    ].join("|");
     let client = this.agentClients.get(cacheKey);
     if (!client) {
-      const base = this.config.defaultLLMConfig;
       const apiKey = override.apiKeyEnv
         ? process.env[override.apiKeyEnv] ?? ""
         : base?.apiKey ?? "";
       client = createLLMClient({
-        provider: override.provider ?? base?.provider ?? "custom",
+        provider,
         baseUrl: override.baseUrl,
         apiKey,
         model: override.model,
         temperature: base?.temperature ?? 0.7,
         maxTokens: base?.maxTokens ?? 8192,
         thinkingBudget: base?.thinkingBudget ?? 0,
-        apiFormat: base?.apiFormat ?? "chat",
-        stream: override.stream ?? base?.stream ?? true,
+        apiFormat,
+        stream,
       });
       this.agentClients.set(cacheKey, client);
     }
