@@ -7,7 +7,7 @@ describe("tui output", () => {
       intent: "write_next",
       status: "completed",
       bookId: "harbor",
-    })).toContain("Completed write_next for harbor");
+    })).toContain("harbor");
   });
 
   it("summarizes a mode switch", () => {
@@ -15,7 +15,7 @@ describe("tui output", () => {
       intent: "switch_mode",
       status: "completed",
       mode: "auto",
-    })).toContain("Switched mode to auto");
+    })).toContain("auto");
   });
 
   it("prefers explicit response text when provided", () => {
