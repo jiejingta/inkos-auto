@@ -39,14 +39,22 @@ interface Nav {
   toBookCreate: () => void;
 }
 
-function BookMenu({ bookId, bookTitle, nav, t, onDelete }: {
+function BookMenu({ bookId, bookTitle, nav, t, onDelete, onOpenChange }: {
   readonly bookId: string;
   readonly bookTitle: string;
   readonly nav: Nav;
   readonly t: TFunction;
   readonly onDelete: () => void;
+  readonly onOpenChange?: (open: boolean) => void;
 }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpenRaw] = useState(false);
+  const setOpen = (next: boolean | ((prev: boolean) => boolean)) => {
+    setOpenRaw((prev) => {
+      const value = typeof next === "function" ? next(prev) : next;
+      onOpenChange?.(value);
+      return value;
+    });
+  };
   const [confirmDelete, setConfirmDelete] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
 
@@ -118,6 +126,7 @@ function BookMenu({ bookId, bookTitle, nav, t, onDelete }: {
 
 export function Dashboard({ nav, sse, theme, t }: { nav: Nav; sse: { messages: ReadonlyArray<SSEMessage> }; theme: Theme; t: TFunction }) {
   const c = useColors(theme);
+  const [menuOpenBookId, setMenuOpenBookId] = useState<string | null>(null);
   const { data, loading, error, refetch } = useApi<{ books: ReadonlyArray<BookSummary> }>("/books");
   const writingBooks = useMemo(() => deriveActiveBookIds(sse.messages), [sse.messages]);
 
@@ -191,7 +200,7 @@ export function Dashboard({ nav, sse, theme, t }: { nav: Nav; sse: { messages: R
           return (
             <div
               key={book.id}
-              className={`paper-sheet group relative rounded-2xl fade-in ${staggerClass}`}
+              className={`paper-sheet group relative rounded-2xl fade-in ${staggerClass} ${menuOpenBookId === book.id ? "z-50" : ""}`}
             >
               <div className="p-8 flex items-start justify-between">
                 <div className="flex-1 min-w-0">
@@ -280,6 +289,7 @@ export function Dashboard({ nav, sse, theme, t }: { nav: Nav; sse: { messages: R
                     nav={nav}
                     t={t}
                     onDelete={() => refetch()}
+                    onOpenChange={(isOpen) => setMenuOpenBookId(isOpen ? book.id : null)}
                   />
                 </div>
               </div>
