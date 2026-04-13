@@ -354,11 +354,12 @@ export class StateManager {
 
       await Promise.all(
         optionalFiles.map(async (f) => {
+          const targetPath = join(storyDir, f);
           try {
             const content = await readFile(join(snapshotDir, f), "utf-8");
-            await writeFile(join(storyDir, f), content, "utf-8");
+            await writeFile(targetPath, content, "utf-8");
           } catch {
-            // Optional file missing — skip
+            await rm(targetPath, { force: true });
           }
         }),
       );

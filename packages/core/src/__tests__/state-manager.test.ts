@@ -472,6 +472,22 @@ describe("StateManager", () => {
       expect(ledger).toBe("# Ledger at ch1");
     });
 
+    it("removes live optional truth files that are absent from the snapshot", async () => {
+      const storyDir = join(manager.bookDir(bookId), "story");
+      await rm(join(storyDir, "particle_ledger.md"));
+      await manager.snapshotState(bookId, 1);
+
+      await writeFile(
+        join(storyDir, "particle_ledger.md"),
+        "# Ledger added after snapshot",
+        "utf-8",
+      );
+
+      const restored = await manager.restoreState(bookId, 1);
+      expect(restored).toBe(true);
+      await expect(stat(join(storyDir, "particle_ledger.md"))).rejects.toThrow();
+    });
+
     it("restores structured runtime state files from snapshot/state", async () => {
       const stateDir = manager.stateDir(bookId);
       await mkdir(stateDir, { recursive: true });

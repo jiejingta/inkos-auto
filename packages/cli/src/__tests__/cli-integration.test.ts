@@ -639,6 +639,46 @@ describe("CLI integration", () => {
       expect(`${stdout}\n${stderr}`).toContain("legacy format");
     });
 
+    it("fails rewrite before deleting chapters when the rollback snapshot is missing", async () => {
+      const bookId = "rewrite-missing-snapshot";
+      const bookDir = join(projectDir, "books", bookId);
+      const storyDir = join(bookDir, "story");
+      const chaptersDir = join(bookDir, "chapters");
+
+      await mkdir(chaptersDir, { recursive: true });
+      await mkdir(storyDir, { recursive: true });
+      await writeFile(
+        join(bookDir, "book.json"),
+        JSON.stringify({
+          id: bookId,
+          title: "Rewrite Missing Snapshot",
+          platform: "other",
+          genre: "other",
+          status: "active",
+          targetChapters: 10,
+          chapterWordCount: 2200,
+          createdAt: "2026-03-22T00:00:00.000Z",
+          updatedAt: "2026-03-22T00:00:00.000Z",
+        }, null, 2),
+        "utf-8",
+      );
+      await writeFile(join(storyDir, "current_state.md"), "State at ch1", "utf-8");
+      await writeFile(join(storyDir, "pending_hooks.md"), "Hooks at ch1", "utf-8");
+      await writeFile(join(chaptersDir, "0001_ch1.md"), "# Chapter 1\n\nContent 1", "utf-8");
+      await writeFile(join(chaptersDir, "0002_ch2.md"), "# Chapter 2\n\nContent 2", "utf-8");
+      await writeFile(join(chaptersDir, "index.json"), JSON.stringify([
+        { number: 1, title: "Ch1", status: "approved", wordCount: 100, createdAt: "", updatedAt: "", auditIssues: [], lengthWarnings: [] },
+        { number: 2, title: "Ch2", status: "approved", wordCount: 100, createdAt: "", updatedAt: "", auditIssues: [], lengthWarnings: [] },
+      ], null, 2), "utf-8");
+
+      const { exitCode, stdout, stderr } = runStderr(["write", "rewrite", bookId, "2", "--force"], {
+        env: failingLlmEnv,
+      });
+      expect(exitCode).not.toBe(0);
+      expect(`${stdout}\n${stderr}`).toContain("missing snapshot for chapter 1");
+      await expect(readFile(join(chaptersDir, "0002_ch2.md"), "utf-8")).resolves.toContain("Content 2");
+    });
+
     it("keeps next chapter at 2 after rewrite 2 trims later chapters, even if regeneration fails", async () => {
       const state = new StateManager(projectDir);
       const bookId = "rewrite-cli";
@@ -699,6 +739,7 @@ describe("CLI integration", () => {
       });
       expect(exitCode).not.toBe(0);
       expect(`${stdout}\n${stderr}`).toContain("Regenerating chapter 2");
+      expect(`${stdout}\n${stderr}`).not.toContain("resolved to 3");
 
       const next = await state.getNextChapterNumber(bookId);
       expect(next).toBe(2);

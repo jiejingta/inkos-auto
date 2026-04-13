@@ -1,6 +1,6 @@
 import { Command } from "commander";
 import { PipelineRunner, StateManager } from "@actalk/inkos-core";
-import { readdir, unlink } from "node:fs/promises";
+import { readdir, stat, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { loadConfig, buildPipelineConfig, findProjectRoot, getLegacyMigrationHint, resolveContext, resolveBookId, log, logError } from "../utils.js";
@@ -126,6 +126,11 @@ writeCommand
       const state = new StateManager(root);
       const bookDir = state.bookDir(bookId);
       const chaptersDir = join(bookDir, "chapters");
+      const restoreFrom = chapter - 1;
+      const restoreSnapshotDir = join(bookDir, "story", "snapshots", String(restoreFrom));
+      await stat(restoreSnapshotDir).catch(() => {
+        throw new Error(`Cannot rewrite chapter ${chapter}: missing snapshot for chapter ${restoreFrom}`);
+      });
       const migrationHint = await getLegacyMigrationHint(root, bookId);
       if (migrationHint && !opts.json) {
         log(`[migration] ${migrationHint}`);
@@ -156,12 +161,15 @@ writeCommand
       }
 
       // Restore state to previous chapter's end-state (chapter 1 uses snapshot-0 from initBook)
-      const restoreFrom = chapter - 1;
       const restored = await state.restoreState(bookId, restoreFrom);
-      if (restored) {
-        if (!opts.json) log(`State restored from chapter ${restoreFrom} snapshot.`);
-      } else {
-        if (!opts.json) log(`Warning: no snapshot for chapter ${restoreFrom}. Using current state.`);
+      if (!restored) {
+        throw new Error(`Cannot rewrite chapter ${chapter}: failed to restore snapshot for chapter ${restoreFrom}`);
+      }
+      if (!opts.json) log(`State restored from chapter ${restoreFrom} snapshot.`);
+
+      const nextChapter = await state.getNextChapterNumber(bookId);
+      if (nextChapter !== chapter) {
+        throw new Error(`Cannot rewrite chapter ${chapter}: expected next chapter to be ${chapter}, but resolved to ${nextChapter}`);
       }
 
       if (!opts.json) log(`Regenerating chapter ${chapter}...`);
