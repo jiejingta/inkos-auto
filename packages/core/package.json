@@ -1,5 +1,5 @@
 {
-  "name": "@actalk/inkos-core",
+  "name": "@jiejingtazhu/inkos-core",
   "version": "1.2.0",
   "description": "InkOS core engine — multi-agent novel writing pipeline with 33-dimension continuity audit, style cloning, and de-AI-ification",
   "keywords": [
@@ -31,7 +31,7 @@
   "license": "AGPL-3.0-only",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Narcooo/inkos.git",
+    "url": "https://github.com/jiejingta/inkos-auto.git",
     "directory": "packages/core"
   },
   "scripts": {

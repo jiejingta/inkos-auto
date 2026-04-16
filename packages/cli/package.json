@@ -1,5 +1,5 @@
 {
-  "name": "@actalk/inkos",
+  "name": "@jiejingtazhu/inkos",
   "version": "1.2.0",
   "description": "Autonomous AI novel writing CLI agent — 10-agent pipeline that writes, audits, and revises novels with continuity tracking. Supports LitRPG, Progression Fantasy, Isekai, Romantasy, Sci-Fi and more.",
   "keywords": [
@@ -30,7 +30,7 @@
   "license": "AGPL-3.0-only",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Narcooo/inkos.git",
+    "url": "https://github.com/jiejingta/inkos-auto.git",
     "directory": "packages/cli"
   },
   "scripts": {
@@ -43,8 +43,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@actalk/inkos-core": "workspace:*",
-    "@actalk/inkos-studio": "workspace:*",
+    "@jiejingtazhu/inkos-core": "workspace:*",
+    "@jiejingtazhu/inkos-studio": "workspace:*",
     "commander": "^13.0.0",
     "dotenv": "^16.4.0",
     "epub-gen-memory": "^1.0.10",

@@ -6,11 +6,10 @@
 <h1 align="center">自律型小説執筆 AIエージェント</h1>
 
 <p align="center">
-  <a href="https://www.npmjs.com/package/@actalk/inkos"><img src="https://img.shields.io/npm/v/@actalk/inkos.svg?color=cb3837&logo=npm" alt="npm version"></a>
+  <a href="https://www.npmjs.com/package/@jiejingtazhu/inkos"><img src="https://img.shields.io/npm/v/@jiejingtazhu/inkos.svg?color=cb3837&logo=npm" alt="npm version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-AGPL%20v3-blue.svg" alt="License: AGPL-3.0"></a>
-  <a href="https://github.com/Narcooo/inkos/stargazers"><img src="https://img.shields.io/github/stars/Narcooo/inkos?style=flat&logo=github&color=yellow" alt="GitHub stars"></a>
-  <a href="https://www.npmjs.com/package/@actalk/inkos"><img src="https://img.shields.io/npm/dm/@actalk/inkos?color=cb3837&logo=npm&label=downloads" alt="npm downloads"></a>
-  <a href="https://clawhub.ai/narcooo/inkos"><img src="https://img.shields.io/badge/🦞%20ClawHub-Skill-FF6B35?labelColor=1a1a1a" alt="ClawHub Skill"></a>
+  <a href="https://github.com/jiejingta/inkos-auto/stargazers"><img src="https://img.shields.io/github/stars/jiejingta/inkos-auto?style=flat&logo=github&color=yellow" alt="GitHub stars"></a>
+  <a href="https://www.npmjs.com/package/@jiejingtazhu/inkos"><img src="https://img.shields.io/npm/dm/@jiejingtazhu/inkos?color=cb3837&logo=npm&label=downloads" alt="npm downloads"></a>
 </p>
 
 <p align="center">
@@ -32,18 +31,12 @@
 ### インストール
 
 ```bash
-npm i -g @actalk/inkos
+npm i -g @jiejingtazhu/inkos
 ```
 
-### OpenClaw 🦞 経由で使用
+### 互換 Agent / OpenClaw 🦞 経由で使用
 
-InkOS は [OpenClaw](https://clawhub.ai) Skill として公開されており、互換エージェント（Claude Code、OpenClaw など）から呼び出し可能です：
-
-```bash
-clawhub install inkos          # ClawHub からインストール
-```
-
-npm でインストール済み、またはリポジトリをクローン済みの場合、`skills/SKILL.md` が含まれているため、ClawHub の別途インストールなしで 🦞 が直接読み取れます。
+npm でインストール済み、またはリポジトリをクローン済みの場合、`skills/SKILL.md` が含まれているため、互換エージェント（Claude Code、OpenClaw など）はローカルから直接参照できます。この fork を今後 ClawHub に公開する場合は、その配布先に対応した `clawhub install` コマンドを追加してください。
 
 インストール後、Claw は InkOS のアトミックコマンドとコントロールサーフェス操作（`plan chapter`/`compose chapter`/`draft`/`audit`/`revise`/`write next`）を `exec` 経由で呼び出し可能で、`--json` 出力による構造化された意思決定が可能です。推奨フロー：`author_intent.md` または `current_focus.md` を更新し、`plan` / `compose` を実行、その後 `draft` または完全パイプラインの `write next` を選択。[ClawHub](https://clawhub.ai) で `inkos` を検索して閲覧することもできます。
 

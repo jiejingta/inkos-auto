@@ -1,5 +1,5 @@
 import { Command } from "commander";
-import { Scheduler } from "@actalk/inkos-core";
+import { Scheduler } from "@jiejingtazhu/inkos-core";
 import { loadConfig, findProjectRoot, buildPipelineConfig, log, logError } from "../utils.js";
 import { createWriteStream, type WriteStream } from "node:fs";
 import { writeFile, readFile, unlink } from "node:fs/promises";

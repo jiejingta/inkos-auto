@@ -1128,6 +1128,50 @@ describe("StateManager", () => {
     });
   });
 
+  describe("review staging", () => {
+    const bookId = "review-stage-book";
+
+    beforeEach(async () => {
+      const storyDir = join(manager.bookDir(bookId), "story");
+      await mkdir(storyDir, { recursive: true });
+      await Promise.all([
+        writeFile(join(storyDir, "current_state.md"), "# Official State", "utf-8"),
+        writeFile(join(storyDir, "pending_hooks.md"), "# Official Hooks", "utf-8"),
+        writeFile(join(storyDir, "particle_ledger.md"), "# Official Ledger", "utf-8"),
+      ]);
+    });
+
+    it("promotes staged review truth into official story files and clears the staging area", async () => {
+      const stageBookDir = await manager.resetReviewStage(bookId, 3);
+      const stageStoryDir = join(stageBookDir, "story");
+      await mkdir(join(stageStoryDir, "state"), { recursive: true });
+      await Promise.all([
+        writeFile(join(stageStoryDir, "current_state.md"), "# Staged State", "utf-8"),
+        writeFile(join(stageStoryDir, "pending_hooks.md"), "# Staged Hooks", "utf-8"),
+        writeFile(join(stageStoryDir, "chapter_summaries.md"), "# Staged Summaries", "utf-8"),
+        writeFile(join(stageStoryDir, "state", "manifest.json"), JSON.stringify({
+          schemaVersion: 2,
+          language: "en",
+          lastAppliedChapter: 3,
+          projectionVersion: 1,
+          migrationWarnings: [],
+        }, null, 2), "utf-8"),
+      ]);
+
+      const promoted = await manager.promoteReviewStage(bookId, 3);
+
+      expect(promoted).toBe(true);
+      await expect(readFile(join(manager.bookDir(bookId), "story", "current_state.md"), "utf-8"))
+        .resolves.toBe("# Staged State");
+      await expect(readFile(join(manager.bookDir(bookId), "story", "pending_hooks.md"), "utf-8"))
+        .resolves.toBe("# Staged Hooks");
+      await expect(readFile(join(manager.bookDir(bookId), "story", "chapter_summaries.md"), "utf-8"))
+        .resolves.toBe("# Staged Summaries");
+      await expect(stat(join(manager.bookDir(bookId), "story", "state", "manifest.json"))).resolves.toBeTruthy();
+      await expect(stat(manager.reviewStageRoot(bookId))).rejects.toThrow();
+    });
+  });
+
   // -------------------------------------------------------------------------
   // rollbackToChapter — reject a chapter and discard downstream state
   // -------------------------------------------------------------------------
@@ -1264,6 +1308,19 @@ describe("StateManager", () => {
       await expect(stat(join(storyDir, "memory.db"))).rejects.toThrow();
       await expect(stat(join(storyDir, "memory.db-shm"))).rejects.toThrow();
       await expect(stat(join(storyDir, "memory.db-wal"))).rejects.toThrow();
+    });
+
+    it("clears pending review staging when rolling back", async () => {
+      await setupRollbackBook();
+
+      const stageBookDir = await manager.resetReviewStage(bookId, 3);
+      await mkdir(join(stageBookDir, "story"), { recursive: true });
+      await writeFile(join(stageBookDir, "story", "current_state.md"), "# Staged State", "utf-8");
+      await writeFile(join(stageBookDir, "story", "pending_hooks.md"), "# Staged Hooks", "utf-8");
+
+      await manager.rollbackToChapter(bookId, 1);
+
+      await expect(stat(manager.reviewStageRoot(bookId))).rejects.toThrow();
     });
   });
 });

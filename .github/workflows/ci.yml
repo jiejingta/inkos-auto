@@ -48,11 +48,12 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
+      - run: pnpm verify:publish-manifests
 
       - name: Verify no workspace:* in tarballs
         run: |
           set -euo pipefail
-          for pkg in packages/core packages/cli; do
+          for pkg in packages/core packages/studio packages/cli; do
             echo "--- Checking $pkg ---"
             cd "$pkg"
             PACKDIR=$(mktemp -d)

@@ -6,7 +6,7 @@ import {
   type InteractionIntentType,
   type InteractionRuntimeTools,
   type InteractionSession,
-} from "@actalk/inkos-core";
+} from "@jiejingtazhu/inkos-core";
 import { Box, Text, useApp, useInput } from "ink";
 import { describeActivityState } from "./activity-state.js";
 import { resolveComposerCaretState } from "./composer-caret.js";

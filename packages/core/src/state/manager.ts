@@ -5,6 +5,21 @@ import type { ChapterMeta } from "../models/chapter.js";
 import { bootstrapStructuredStateFromMarkdown, resolveDurableStoryProgress } from "./state-bootstrap.js";
 
 export class StateManager {
+  private static readonly requiredReviewTruthFileSet = new Set<string>([
+    "current_state.md",
+    "pending_hooks.md",
+  ]);
+
+  private static readonly reviewTruthFiles = [
+    "current_state.md",
+    "pending_hooks.md",
+    "particle_ledger.md",
+    "chapter_summaries.md",
+    "subplot_board.md",
+    "emotional_arcs.md",
+    "character_matrix.md",
+  ] as const;
+
   constructor(private readonly projectRoot: string) {}
 
   private static defaultAuthorIntent(language: "zh" | "en"): string {
@@ -143,6 +158,87 @@ export class StateManager {
 
   stateDir(bookId: string): string {
     return join(this.bookDir(bookId), "story", "state");
+  }
+
+  reviewStageRoot(bookId: string): string {
+    return join(this.bookDir(bookId), ".review-staging");
+  }
+
+  reviewStageBookDir(bookId: string, chapterNumber: number): string {
+    return join(
+      this.reviewStageRoot(bookId),
+      `chapter-${String(chapterNumber).padStart(4, "0")}`,
+    );
+  }
+
+  async resetReviewStage(bookId: string, chapterNumber: number): Promise<string> {
+    const root = this.reviewStageRoot(bookId);
+    await rm(root, { recursive: true, force: true });
+    const stageBookDir = this.reviewStageBookDir(bookId, chapterNumber);
+    await mkdir(stageBookDir, { recursive: true });
+    return stageBookDir;
+  }
+
+  async hasReviewStage(bookId: string, chapterNumber: number): Promise<boolean> {
+    try {
+      await stat(this.reviewStageBookDir(bookId, chapterNumber));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async discardReviewStage(bookId: string, chapterNumber?: number): Promise<void> {
+    const target = chapterNumber === undefined
+      ? this.reviewStageRoot(bookId)
+      : this.reviewStageBookDir(bookId, chapterNumber);
+    await rm(target, { recursive: true, force: true });
+  }
+
+  async promoteReviewStage(bookId: string, chapterNumber: number): Promise<boolean> {
+    const stageBookDir = this.reviewStageBookDir(bookId, chapterNumber);
+    if (!(await this.exists(stageBookDir))) {
+      return false;
+    }
+
+    const sourceStoryDir = join(stageBookDir, "story");
+    const targetStoryDir = join(this.bookDir(bookId), "story");
+    await mkdir(targetStoryDir, { recursive: true });
+
+    for (const fileName of StateManager.reviewTruthFiles) {
+      const sourcePath = join(sourceStoryDir, fileName);
+      const targetPath = join(targetStoryDir, fileName);
+      if (await this.exists(sourcePath)) {
+        const content = await readFile(sourcePath, "utf-8");
+        await writeFile(targetPath, content, "utf-8");
+        continue;
+      }
+
+      if (StateManager.requiredReviewTruthFileSet.has(fileName)) {
+        throw new Error(
+          `Staged review truth for chapter ${chapterNumber} is missing required file "${fileName}".`,
+        );
+      }
+
+      await rm(targetPath, { force: true });
+    }
+
+    const sourceStateDir = join(sourceStoryDir, "state");
+    const targetStateDir = this.stateDir(bookId);
+    await rm(targetStateDir, { recursive: true, force: true });
+    if (await this.exists(sourceStateDir)) {
+      await mkdir(targetStateDir, { recursive: true });
+      const stateFiles = await readdir(sourceStateDir);
+      await Promise.all(
+        stateFiles.map(async (fileName) => {
+          const content = await readFile(join(sourceStateDir, fileName), "utf-8");
+          await writeFile(join(targetStateDir, fileName), content, "utf-8");
+        }),
+      );
+    }
+
+    await this.discardReviewStage(bookId);
+    return true;
   }
 
   async loadProjectConfig(): Promise<Record<string, unknown>> {
@@ -491,9 +587,19 @@ export class StateManager {
       rm(join(bookDir, "story", "memory.db-shm"), { force: true }),
       rm(join(bookDir, "story", "memory.db-wal"), { force: true }),
     ]);
+    await this.discardReviewStage(bookId);
 
     await this.saveChapterIndex(bookId, kept);
     return discarded;
+  }
+
+  private async exists(path: string): Promise<boolean> {
+    try {
+      await stat(path);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   private async writeIfMissing(path: string, content: string): Promise<void> {

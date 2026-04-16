@@ -39,6 +39,13 @@
 
 也就是说，`up` 模式已经不再依赖人工执行 `review approve` 才能继续跑。
 
+补充：
+
+- 手动 `inkos write next` 也已经接上同样的前置护栏。只要历史里还存在不是 `approved` / `published` / `imported` 的章节，就不会继续往后写。
+- `review approve` 不再只是改 chapter index；如果目标章节是 `audit-failed`，会先把 staged truth promote 到正式 `story/*`，再更新 snapshot 与记忆索引。
+- 对于 401/403、Anthropic 鉴权缺失、明显的模型缺失或 baseUrl 错配等非重试型运行错误，守护器会立即暂停该书；普通 400 不再直接判死，而是保留重试并把原始错误文本写进日志，方便继续判断是字段兼容、上下文长度还是内容审查问题。
+- provider 层现在区分两种温度约束：`kimi-k2.5` / `thinking` 类模型强制 `temperature=1`；`kimi-for-coding` 这类只允许 `<=1` 的模型会做上限夹制，避免 scheduler 的 retry temperature 把请求抬到 1.0 以上。
+
 ### 2.2 审计门槛
 
 代码入口：
@@ -117,7 +124,8 @@ override 的持久化位置：
 3. Writer 产出正文
 4. Auditor 审计
 5. 若存在阻断性问题，则进入 Reviser
-6. Truth files / chapter index / snapshot 一次性落盘
+6. 若最终状态是 `ready-for-review`，正式 truth files / snapshot 一次性落盘
+7. 若最终状态是 `audit-failed`，章节正文会落盘，但候选 truth 只进 review staging，不覆盖正式 `story/*`
 
 ### 3.2 守护调度
 
@@ -150,9 +158,13 @@ override 的持久化位置：
 - `packages/core/src/pipeline/runner.ts`
   - 单章完整流水线、手动 `auditDraft` / `reviseDraft` / `writeNextChapter` 的主入口。
 - `packages/core/src/pipeline/chapter-persistence.ts`
-  - chapter index 写入格式、状态、审计问题字符串落盘。
+  - chapter index 写入格式，以及 `ready-for-review` / `audit-failed` / `state-degraded` 三种落盘分流。
 - `packages/core/src/pipeline/chapter-state-recovery.ts`
   - `state-degraded` 的降级保存与恢复元数据。
+- `packages/core/src/state/manager.ts`
+  - review staging 的目录结构、promote/discard、rollback 时的清理。
+- `packages/cli/src/commands/review.ts`
+  - 手动 `approve` / `approve-all` 现在会真正提交 staged truth，而不只是改状态。
 - `packages/cli/src/commands/daemon.ts`
   - 守护进程启动/停止与完成日志输出。
 - `packages/core/src/prompts/catalog.ts`
@@ -165,6 +177,12 @@ override 的持久化位置：
   - `/api/project/prompts` 的读写接口。
 - `packages/cli/src/commands/studio.ts`
   - Studio 启动入口。Windows 下源码模式需要把 `tsx` loader 通过 `file://` URL 传给 `node --import`，但主入口 `.ts` 仍保持普通路径。
+- `scripts/pack-release.mjs`
+  - 仓库级本地打包入口：先 `build` + `verify:publish-manifests`，再依次打出 core/studio/cli 的 npm tarball 到 `tmp/release-packages/`。
+- `.github/workflows/ci.yml`
+  - PR / push 时会额外校验 `packages/core`、`packages/studio`、`packages/cli` 的 tarball，提前拦截发布清单问题。
+- `.github/workflows/release.yml`
+  - 推送 `v*` tag 后执行正式发布：先测试和 smoke test，再发布 canary，校验通过后再发 latest。
 
 ## 5. 开发与验证
 
@@ -172,27 +190,64 @@ override 的持久化位置：
 
 ```bash
 npx pnpm install --frozen-lockfile
-npx pnpm --filter @actalk/inkos-core build
-npx pnpm --filter @actalk/inkos-core typecheck
-npx pnpm --filter @actalk/inkos-core test
+npx pnpm --filter @jiejingtazhu/inkos-core build
+npx pnpm --filter @jiejingtazhu/inkos-core typecheck
+npx pnpm --filter @jiejingtazhu/inkos-core test
 ```
 
 已确认通过的本次改动相关验证：
 
-- `@actalk/inkos-core` `typecheck`
-- `@actalk/inkos-core` 全量 `vitest`
-- `@actalk/inkos-studio` `typecheck`
-- `@actalk/inkos-studio` `vitest`
-- `@actalk/inkos` `typecheck`
-- `@actalk/inkos` `studio-runtime.test.ts` / `studio.test.ts`
+- `@jiejingtazhu/inkos-core` `typecheck`
+- `@jiejingtazhu/inkos-core` 全量 `vitest`
+- `@jiejingtazhu/inkos-studio` `typecheck`
+- `@jiejingtazhu/inkos-studio` `vitest`
+- `@jiejingtazhu/inkos` `typecheck`
+- `@jiejingtazhu/inkos` `studio-runtime.test.ts` / `studio.test.ts`
+- `@jiejingtazhu/inkos` `publish-package.test.ts`（Windows）
+- `npx pnpm release:pack`（Windows，本地成功打出 core/studio/cli 三个 tarball）
 - Windows 本机实测：`node ..\\packages\\cli\\dist\\index.js studio --port 4571` 可返回 `HTTP 200`
 
 当前本地环境里的已知问题：
 
-- `@actalk/inkos` 的 `typecheck` 当前可通过；CLI 的 `studio-runtime.test.ts` / `studio.test.ts` 也可通过。
-- `@actalk/inkos` 全量 `vitest` 在 Windows 下仍会被 `publish-package.test.ts` 里的 `tar --force-local` 不兼容拦住。
-- `@actalk/inkos-studio` 的打包相关测试也会受同类 `tar` 兼容性影响。
-- 这些问题都属于当前 Windows 打包链路兼容问题，不是本次 Studio 启动修复新增的业务失败。
+- 这台 Windows 机器的 PowerShell 当前没有把 `pnpm` 直接放进 PATH；需要时可用 `npx pnpm ...` 代替。
+- `packages/studio` 打包时仍会打印 Vite 的大 chunk warning，但这是构建提示，不会阻断 `release:pack` 或 npm 发包。
+
+补充：当前仓库已经有一条更适合发布前自检的本地链路：
+
+```bash
+pnpm release:check
+pnpm release:pack
+```
+
+- `release:check`：构建整个 workspace，并校验发布时的 manifest 可被正确归一化。
+- `release:pack`：在 `release:check` 基础上，额外打出 core/studio/cli 三个 npm tarball。
+
+### 5.1 Git / npm 发布链路
+
+当前仓库要实现“像原版一样一行安装”，靠的是：
+
+1. GitHub 托管源码
+2. npm 托管可安装 CLI 包
+
+也就是说：
+
+- 只 push Git，不会自动得到可安装 CLI。
+- 真正的“一行安装”依赖 `packages/cli` 发布成 npm 包。
+- 仓库已经内置 tag 触发发布流：推送 `v1.2.0` 这类 tag 后，`.github/workflows/release.yml` 会按 `core -> studio -> cli` 顺序发包。
+
+如果后续要发自己的 fork，先检查：
+
+- `packages/core/package.json`
+- `packages/studio/package.json`
+- `packages/cli/package.json`
+
+尤其是：
+
+- `name`
+- `repository.url`
+- `repository.directory`
+
+如果不改包名，默认还是往当前 `@jiejingtazhu/*` 包名上发布，需要对应 npm 权限。
 
 ## 6. 文档维护约定
 
@@ -203,11 +258,14 @@ npx pnpm --filter @actalk/inkos-core test
 - `daemon.qualityGates` 默认值或语义
 - 自动修订模式的升级条件
 - chapter status 的含义或新增状态
+- 正式 truth files 与 review staging 的分工
 - chapter index 中 `auditIssues` 的格式
 - 守护进程是否仍需要人工 approve
+- `review approve` 是否仍然承担 staged truth promote
 - prompt 目录是否新增/删除入口
 - `promptOverrides` 的存储格式或覆盖语义
 - Studio 提示词页/API 的入口位置
+- 本地打包命令、CI 打包校验或 tag 发布流程
 
 ## 7. 本次初始化记录
 

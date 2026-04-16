@@ -30,8 +30,10 @@ function createAuditResult(overrides?: Partial<AuditResult>): AuditResult {
 
 describe("persistChapterArtifacts", () => {
   it("persists truth files, index, drift guidance, and snapshots for reviewable chapters", async () => {
-    const saveChapter = vi.fn().mockResolvedValue(undefined);
-    const saveTruthFiles = vi.fn().mockResolvedValue(undefined);
+    const saveChapterManuscript = vi.fn().mockResolvedValue(undefined);
+    const saveOfficialTruthFiles = vi.fn().mockResolvedValue(undefined);
+    const saveReviewStageTruthFiles = vi.fn().mockResolvedValue(undefined);
+    const clearReviewStageTruthFiles = vi.fn().mockResolvedValue(undefined);
     const saveChapterIndex = vi.fn().mockResolvedValue(undefined);
     const markBookActiveIfNeeded = vi.fn().mockResolvedValue(undefined);
     const persistAuditDriftGuidance = vi.fn().mockResolvedValue(undefined);
@@ -55,8 +57,10 @@ describe("persistChapterArtifacts", () => {
       degradedIssues: [],
       tokenUsage: ZERO_USAGE,
       loadChapterIndex: async () => [] satisfies ReadonlyArray<ChapterMeta>,
-      saveChapter,
-      saveTruthFiles,
+      saveChapterManuscript,
+      saveOfficialTruthFiles,
+      saveReviewStageTruthFiles,
+      clearReviewStageTruthFiles,
       saveChapterIndex,
       markBookActiveIfNeeded,
       persistAuditDriftGuidance,
@@ -66,8 +70,10 @@ describe("persistChapterArtifacts", () => {
       now: () => "2026-04-01T00:00:00.000Z",
     });
 
-    expect(saveChapter).toHaveBeenCalledTimes(1);
-    expect(saveTruthFiles).toHaveBeenCalledTimes(1);
+    expect(saveChapterManuscript).toHaveBeenCalledTimes(1);
+    expect(saveOfficialTruthFiles).toHaveBeenCalledTimes(1);
+    expect(saveReviewStageTruthFiles).not.toHaveBeenCalled();
+    expect(clearReviewStageTruthFiles).toHaveBeenCalledTimes(1);
     expect(saveChapterIndex).toHaveBeenCalledWith([
       expect.objectContaining({
         number: 3,
@@ -94,8 +100,10 @@ describe("persistChapterArtifacts", () => {
   });
 
   it("skips truth persistence and snapshots for state-degraded chapters while preserving review note", async () => {
-    const saveChapter = vi.fn().mockResolvedValue(undefined);
-    const saveTruthFiles = vi.fn().mockResolvedValue(undefined);
+    const saveChapterManuscript = vi.fn().mockResolvedValue(undefined);
+    const saveOfficialTruthFiles = vi.fn().mockResolvedValue(undefined);
+    const saveReviewStageTruthFiles = vi.fn().mockResolvedValue(undefined);
+    const clearReviewStageTruthFiles = vi.fn().mockResolvedValue(undefined);
     const saveChapterIndex = vi.fn().mockResolvedValue(undefined);
     const markBookActiveIfNeeded = vi.fn().mockResolvedValue(undefined);
     const persistAuditDriftGuidance = vi.fn().mockResolvedValue(undefined);
@@ -117,8 +125,10 @@ describe("persistChapterArtifacts", () => {
       degradedIssues: [createIssue({ description: "state mismatch" })],
       tokenUsage: ZERO_USAGE,
       loadChapterIndex: async () => [] satisfies ReadonlyArray<ChapterMeta>,
-      saveChapter,
-      saveTruthFiles,
+      saveChapterManuscript,
+      saveOfficialTruthFiles,
+      saveReviewStageTruthFiles,
+      clearReviewStageTruthFiles,
       saveChapterIndex,
       markBookActiveIfNeeded,
       persistAuditDriftGuidance,
@@ -128,8 +138,10 @@ describe("persistChapterArtifacts", () => {
       now: () => "2026-04-01T00:00:00.000Z",
     });
 
-    expect(saveChapter).toHaveBeenCalledTimes(1);
-    expect(saveTruthFiles).not.toHaveBeenCalled();
+    expect(saveChapterManuscript).toHaveBeenCalledTimes(1);
+    expect(saveOfficialTruthFiles).not.toHaveBeenCalled();
+    expect(saveReviewStageTruthFiles).not.toHaveBeenCalled();
+    expect(clearReviewStageTruthFiles).toHaveBeenCalledTimes(1);
     expect(saveChapterIndex).toHaveBeenCalledWith([
       expect.objectContaining({
         number: 4,
@@ -148,5 +160,60 @@ describe("persistChapterArtifacts", () => {
     expect(logSnapshotStage).not.toHaveBeenCalled();
     expect(snapshotState).not.toHaveBeenCalled();
     expect(syncCurrentStateFactHistory).not.toHaveBeenCalled();
+  });
+
+  it("writes audit-failed truth into review staging without advancing official snapshots", async () => {
+    const saveChapterManuscript = vi.fn().mockResolvedValue(undefined);
+    const saveOfficialTruthFiles = vi.fn().mockResolvedValue(undefined);
+    const saveReviewStageTruthFiles = vi.fn().mockResolvedValue(undefined);
+    const clearReviewStageTruthFiles = vi.fn().mockResolvedValue(undefined);
+    const saveChapterIndex = vi.fn().mockResolvedValue(undefined);
+    const markBookActiveIfNeeded = vi.fn().mockResolvedValue(undefined);
+    const persistAuditDriftGuidance = vi.fn().mockResolvedValue(undefined);
+    const snapshotState = vi.fn().mockResolvedValue(undefined);
+    const syncCurrentStateFactHistory = vi.fn().mockResolvedValue(undefined);
+    const logSnapshotStage = vi.fn();
+
+    await persistChapterArtifacts({
+      chapterNumber: 5,
+      chapterTitle: "Pending Audit",
+      status: "audit-failed",
+      auditResult: createAuditResult({
+        passed: false,
+        issues: [createIssue({ description: "still needs work" })],
+        summary: "needs revision",
+      }),
+      finalWordCount: 640,
+      lengthWarnings: [],
+      degradedIssues: [],
+      tokenUsage: ZERO_USAGE,
+      loadChapterIndex: async () => [] satisfies ReadonlyArray<ChapterMeta>,
+      saveChapterManuscript,
+      saveOfficialTruthFiles,
+      saveReviewStageTruthFiles,
+      clearReviewStageTruthFiles,
+      saveChapterIndex,
+      markBookActiveIfNeeded,
+      persistAuditDriftGuidance,
+      snapshotState,
+      syncCurrentStateFactHistory,
+      logSnapshotStage,
+      now: () => "2026-04-01T00:00:00.000Z",
+    });
+
+    expect(saveChapterManuscript).toHaveBeenCalledTimes(1);
+    expect(saveOfficialTruthFiles).not.toHaveBeenCalled();
+    expect(saveReviewStageTruthFiles).toHaveBeenCalledTimes(1);
+    expect(clearReviewStageTruthFiles).not.toHaveBeenCalled();
+    expect(saveChapterIndex).toHaveBeenCalledWith([
+      expect.objectContaining({
+        number: 5,
+        status: "audit-failed",
+        auditIssues: ["[warning] continuity: still needs work"],
+      }),
+    ]);
+    expect(snapshotState).not.toHaveBeenCalled();
+    expect(syncCurrentStateFactHistory).not.toHaveBeenCalled();
+    expect(logSnapshotStage).not.toHaveBeenCalled();
   });
 });

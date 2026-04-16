@@ -6,11 +6,10 @@
 <h1 align="center">Autonomous Novel Writing AI Agent</h1>
 
 <p align="center">
-  <a href="https://www.npmjs.com/package/@actalk/inkos"><img src="https://img.shields.io/npm/v/@actalk/inkos.svg?color=cb3837&logo=npm" alt="npm version"></a>
+  <a href="https://www.npmjs.com/package/@jiejingtazhu/inkos"><img src="https://img.shields.io/npm/v/@jiejingtazhu/inkos.svg?color=cb3837&logo=npm" alt="npm version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-AGPL%20v3-blue.svg" alt="License: AGPL-3.0"></a>
-  <a href="https://github.com/Narcooo/inkos/stargazers"><img src="https://img.shields.io/github/stars/Narcooo/inkos?style=flat&logo=github&color=yellow" alt="GitHub stars"></a>
-  <a href="https://www.npmjs.com/package/@actalk/inkos"><img src="https://img.shields.io/npm/dm/@actalk/inkos?color=cb3837&logo=npm&label=downloads" alt="npm downloads"></a>
-  <a href="https://clawhub.ai/narcooo/inkos"><img src="https://img.shields.io/badge/🦞%20ClawHub-Skill-FF6B35?labelColor=1a1a1a" alt="ClawHub Skill"></a>
+  <a href="https://github.com/jiejingta/inkos-auto/stargazers"><img src="https://img.shields.io/github/stars/jiejingta/inkos-auto?style=flat&logo=github&color=yellow" alt="GitHub stars"></a>
+  <a href="https://www.npmjs.com/package/@jiejingtazhu/inkos"><img src="https://img.shields.io/npm/dm/@jiejingtazhu/inkos?color=cb3837&logo=npm&label=downloads" alt="npm downloads"></a>
 </p>
 
 <p align="center">
@@ -32,18 +31,12 @@ Open-source AI Agent that autonomously writes, audits, and revises novels — wi
 ### Install
 
 ```bash
-npm i -g @actalk/inkos
+npm i -g @jiejingtazhu/inkos
 ```
 
-### Use via OpenClaw 🦞
+### Use via compatible agents / OpenClaw 🦞
 
-InkOS is published as an [OpenClaw](https://clawhub.ai/narcooo/inkos) Skill, callable by any compatible agent (Claude Code, OpenClaw, etc.):
-
-```bash
-clawhub install inkos          # Install from ClawHub
-```
-
-If you installed via npm or cloned the repo, `skills/SKILL.md` is already included — 🦞 can read it directly without a separate ClawHub install.
+If you installed via npm or cloned the repo, `skills/SKILL.md` is already included, so compatible agents (Claude Code, OpenClaw, etc.) can read it locally without a separate ClawHub install. If you later publish this fork to ClawHub, you can add a matching `clawhub install` command for that distribution.
 
 Once installed, Claw should prefer the shared interaction entry:
 
@@ -415,11 +408,11 @@ pnpm typecheck    # Type-check without emitting
 
 ## Star History
 
-<a href="https://www.star-history.com/#Narcooo/inkos&type=date&legend=top-left">
+<a href="https://www.star-history.com/#jiejingta/inkos-auto&type=date&legend=top-left">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=Narcooo/inkos&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=Narcooo/inkos&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=Narcooo/inkos&type=date&legend=top-left" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=jiejingta/inkos-auto&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=jiejingta/inkos-auto&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=jiejingta/inkos-auto&type=date&legend=top-left" />
  </picture>
 </a>
 
@@ -429,8 +422,8 @@ pnpm typecheck    # Type-check without emitting
 
 ## Contributors
 
-<a href="https://github.com/Narcooo/inkos/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=Narcooo/inkos" />
+<a href="https://github.com/jiejingta/inkos-auto/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=jiejingta/inkos-auto" />
 </a>
 
 ## License

@@ -73,6 +73,7 @@ export interface LLMClient {
   readonly provider: "openai" | "anthropic";
   readonly apiFormat: "chat" | "responses";
   readonly stream: boolean;
+  readonly baseUrl?: string;
   readonly _openai?: OpenAI;
   readonly _anthropic?: Anthropic;
   readonly defaults: {
@@ -130,6 +131,7 @@ export function createLLMClient(config: LLMConfig): LLMClient {
       provider: "anthropic",
       apiFormat,
       stream,
+      baseUrl: config.baseUrl,
       _anthropic: new Anthropic({ apiKey: config.apiKey, baseURL }),
       defaults,
     };
@@ -140,6 +142,7 @@ export function createLLMClient(config: LLMConfig): LLMClient {
     provider: "openai",
     apiFormat,
     stream,
+    baseUrl: config.baseUrl,
     _openai: new OpenAI({
       apiKey: config.apiKey,
       baseURL: config.baseUrl,
@@ -192,13 +195,16 @@ function stripReservedKeys(extra: Record<string, unknown>): Record<string, unkno
   return result;
 }
 
-// === Fixed-Temperature Model Clamp ===
+// === Model Temperature Guard ===
 //
 // 部分 thinking 模型（如 Moonshot kimi-k2.5、kimi-thinking-preview）强制要求
 // temperature === 1，其他值会被 API 直接 400 拒绝。为让这类模型能和 inkos
 // 已有的 per-call 温度调参（0.1 validator → 0.8 architect brainstorm）共存，
 // 在 provider 层统一夹制：命中名单就把传入的 temperature 强制改成 1，并对
 // 每个模型名打一次 warning 提示用户。
+//
+// 另一些模型（如 kimi-for-coding）并不要求固定等于 1，但会拒绝任何 >1 的值。
+// 这类模型只做上限夹制，避免 scheduler 在连续失败时把温度抬过接口上限。
 
 function requiresFixedTemperature(model: string): boolean {
   const lower = model.toLowerCase();
@@ -206,23 +212,46 @@ function requiresFixedTemperature(model: string): boolean {
   return lower.startsWith("kimi-k2.5") || lower.includes("thinking");
 }
 
+function resolveModelTemperatureCap(model: string): number | null {
+  const lower = model.toLowerCase();
+  if (lower === "kimi-for-coding" || lower.startsWith("kimi-for-coding-")) {
+    return 1;
+  }
+  return null;
+}
+
 const warnedFixedTemperatureModels = new Set<string>();
+const warnedMaxTemperatureModels = new Set<string>();
 
 function clampTemperatureForModel(model: string, requested: number): number {
-  if (!requiresFixedTemperature(model)) return requested;
-  if (requested === 1) return 1;
-  if (!warnedFixedTemperatureModels.has(model)) {
-    warnedFixedTemperatureModels.add(model);
-    console.warn(
-      `[inkos] 模型 "${model}" 是 thinking 模型，强制 temperature=1（原请求值 ${requested}）`,
-    );
+  if (requiresFixedTemperature(model)) {
+    if (requested === 1) return 1;
+    if (!warnedFixedTemperatureModels.has(model)) {
+      warnedFixedTemperatureModels.add(model);
+      console.warn(
+        `[inkos] 模型 "${model}" 是 thinking 模型，强制 temperature=1（原请求值 ${requested}）`,
+      );
+    }
+    return 1;
   }
-  return 1;
+
+  const cap = resolveModelTemperatureCap(model);
+  if (cap !== null && requested > cap) {
+    if (!warnedMaxTemperatureModels.has(model)) {
+      warnedMaxTemperatureModels.add(model);
+      console.warn(
+        `[inkos] 模型 "${model}" 的 temperature 上限为 ${cap}，已将原请求值 ${requested} 夹制到 ${cap}`,
+      );
+    }
+    return cap;
+  }
+  return requested;
 }
 
 // 仅测试用：清空 warning 去重集合。
 export function __resetFixedTemperatureWarnings(): void {
   warnedFixedTemperatureModels.clear();
+  warnedMaxTemperatureModels.clear();
 }
 
 // === Error Wrapping ===
@@ -232,6 +261,10 @@ function wrapLLMError(error: unknown, context?: { readonly baseUrl?: string; rea
   const ctxLine = context
     ? `\n  (baseUrl: ${context.baseUrl}, model: ${context.model})`
     : "";
+  const rawDetail = msg.trim();
+  const rawSuffix = rawDetail.length > 0
+    ? `\n  原始错误：${rawDetail.slice(0, 600)}`
+    : "";
 
   if (msg.includes("400")) {
     return new Error(
@@ -239,7 +272,8 @@ function wrapLLMError(error: unknown, context?: { readonly baseUrl?: string; rea
       `  1. 模型名称不正确（检查 INKOS_LLM_MODEL）\n` +
       `  2. 提供方不支持某些参数（如 max_tokens、stream）\n` +
       `  3. 消息格式不兼容（部分提供方不支持 system role）\n` +
-      `  建议：检查提供方文档，确认该接口要求流式开启、流式关闭，还是根本不支持 stream${ctxLine}`,
+      `  4. 请求上下文过大或触发了提供方的隐藏限制\n` +
+      `  建议：检查提供方文档，并结合下面的原始错误判断是字段兼容、上下文长度，还是内容审查问题${ctxLine}${rawSuffix}`,
     );
   }
   if (msg.includes("403")) {
@@ -316,7 +350,7 @@ export async function chatCompletion(
   };
   const onStreamProgress = options?.onStreamProgress;
   const onTextDelta = options?.onTextDelta;
-  const errorCtx = { baseUrl: client._openai?.baseURL ?? "(anthropic)", model };
+  const errorCtx = { baseUrl: client.baseUrl ?? client._openai?.baseURL ?? "(anthropic)", model };
 
   try {
     if (client.provider === "anthropic") {

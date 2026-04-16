@@ -97,6 +97,7 @@ describe("chatCompletion stream fallback", () => {
     expect(error.message).toContain("API 返回 400");
     expect(error.message).not.toContain("\"stream\": false");
     expect(error.message).toContain("检查提供方文档");
+    expect(error.message).toContain("原始错误");
   });
 
   it("reports when sync fallback is rejected because provider requires streaming", async () => {
@@ -219,6 +220,41 @@ describe("chatCompletion fixed-temperature clamp (thinking models)", () => {
     ]);
 
     expect(create.mock.calls[0]?.[0]).toMatchObject({ temperature: 1 });
+  });
+
+  it("caps kimi-for-coding temperature to 1 when scheduler retry raises it above the API limit", async () => {
+    const create = vi.fn().mockResolvedValue(OK_RESPONSE);
+    const client = makeSyncClient(create, 0.7);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    await chatCompletion(
+      client,
+      "kimi-for-coding",
+      [{ role: "user", content: "hi" }],
+      { temperature: 1.2 },
+    );
+
+    expect(create.mock.calls[0]?.[0]).toMatchObject({ temperature: 1 });
+    expect(warn).toHaveBeenCalledOnce();
+    expect(warn.mock.calls[0]?.[0]).toContain("temperature 上限为 1");
+    warn.mockRestore();
+  });
+
+  it("keeps kimi-for-coding temperature unchanged when it is already within the API limit", async () => {
+    const create = vi.fn().mockResolvedValue(OK_RESPONSE);
+    const client = makeSyncClient(create, 0.7);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    await chatCompletion(
+      client,
+      "kimi-for-coding",
+      [{ role: "user", content: "hi" }],
+      { temperature: 0.9 },
+    );
+
+    expect(create.mock.calls[0]?.[0]).toMatchObject({ temperature: 0.9 });
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
   });
 
   it("leaves regular models untouched (no clamp, no warning)", async () => {

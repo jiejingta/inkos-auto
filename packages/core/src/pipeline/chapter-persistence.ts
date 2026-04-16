@@ -22,8 +22,10 @@ export async function persistChapterArtifacts(params: {
   readonly degradedIssues: ReadonlyArray<AuditIssue>;
   readonly tokenUsage?: ChapterPersistenceUsage;
   readonly loadChapterIndex: () => Promise<ReadonlyArray<ChapterMeta>>;
-  readonly saveChapter: () => Promise<void>;
-  readonly saveTruthFiles: () => Promise<void>;
+  readonly saveChapterManuscript: () => Promise<void>;
+  readonly saveOfficialTruthFiles: () => Promise<void>;
+  readonly saveReviewStageTruthFiles: () => Promise<void>;
+  readonly clearReviewStageTruthFiles: () => Promise<void>;
   readonly saveChapterIndex: (index: ReadonlyArray<ChapterMeta>) => Promise<void>;
   readonly markBookActiveIfNeeded: () => Promise<void>;
   readonly persistAuditDriftGuidance: (issues: ReadonlyArray<AuditIssue>) => Promise<void>;
@@ -32,9 +34,17 @@ export async function persistChapterArtifacts(params: {
   readonly logSnapshotStage: () => void;
   readonly now?: () => string;
 }): Promise<{ readonly entry: ChapterMeta }> {
-  await params.saveChapter();
-  if (params.status !== "state-degraded") {
-    await params.saveTruthFiles();
+  if (params.status === "ready-for-review") {
+    await params.saveOfficialTruthFiles();
+    await params.saveChapterManuscript();
+    await params.clearReviewStageTruthFiles();
+  } else {
+    await params.saveChapterManuscript();
+    if (params.status === "audit-failed") {
+      await params.saveReviewStageTruthFiles();
+    } else {
+      await params.clearReviewStageTruthFiles();
+    }
   }
 
   const existingIndex = await params.loadChapterIndex();
@@ -65,7 +75,7 @@ export async function persistChapterArtifacts(params: {
   );
   await params.persistAuditDriftGuidance(params.status === "state-degraded" ? [] : driftIssues);
 
-  if (params.status !== "state-degraded") {
+  if (params.status === "ready-for-review") {
     params.logSnapshotStage();
     await params.snapshotState();
     await params.syncCurrentStateFactHistory();

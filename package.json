@@ -18,7 +18,7 @@
   "license": "AGPL-3.0-only",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Narcooo/inkos"
+    "url": "https://github.com/jiejingta/inkos-auto"
   },
   "scripts": {
     "build": "pnpm -r build",
@@ -27,6 +27,8 @@
     "lint": "pnpm -r lint",
     "typecheck": "pnpm -r typecheck",
     "verify:publish-manifests": "node scripts/verify-no-workspace-protocol.mjs packages/core packages/cli packages/studio",
+    "release:check": "pnpm build && pnpm verify:publish-manifests",
+    "release:pack": "node scripts/pack-release.mjs",
     "release": "pnpm build && pnpm test"
   },
   "engines": {

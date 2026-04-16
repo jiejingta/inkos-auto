@@ -31,6 +31,7 @@ import { extractPOVFromOutline, filterMatrixByPOV, filterHooksByPOV } from "../u
 import { parseCreativeOutput } from "./writer-parser.js";
 import { buildRuntimeStateArtifacts, saveRuntimeStateSnapshot, type RuntimeStateArtifacts } from "../state/runtime-state-store.js";
 import type { RuntimeStateSnapshot } from "../state/state-reducer.js";
+import { renderChapterSummariesProjection } from "../state/state-projections.js";
 import { parsePendingHooksMarkdown } from "../utils/memory-retrieval.js";
 import { analyzeHookHealth } from "../utils/hook-health.js";
 import { buildEnglishVarianceBrief } from "../utils/long-span-fatigue.js";
@@ -656,13 +657,22 @@ export class WriterAgent extends BaseAgent {
     numericalSystem: boolean = true,
     language: "zh" | "en" = "zh",
   ): Promise<void> {
+    await this.savePrimaryTruthFiles(bookDir, output, numericalSystem, language);
+    await this.saveChapterManuscript(bookDir, output, language);
+  }
+
+  async saveChapterManuscript(
+    bookDir: string,
+    output: Pick<WriteChapterOutput, "chapterNumber" | "title" | "content">,
+    language: "zh" | "en" = "zh",
+  ): Promise<void> {
     const chaptersDir = join(bookDir, "chapters");
-    const storyDir = join(bookDir, "story");
     await mkdir(chaptersDir, { recursive: true });
 
     const paddedNum = String(output.chapterNumber).padStart(4, "0");
-    const filename = `${paddedNum}_${this.sanitizeFilename(output.title)}.md`;
-
+    const existingFiles = await readdir(chaptersDir).catch(() => [] as string[]);
+    const existingFile = existingFiles.find((fileName) => fileName.startsWith(paddedNum) && fileName.endsWith(".md"));
+    const filename = existingFile ?? `${paddedNum}_${this.sanitizeFilename(output.title)}.md`;
     const heading = language === "en"
       ? `# Chapter ${output.chapterNumber}: ${output.title}`
       : `# 第${output.chapterNumber}章 ${output.title}`;
@@ -671,6 +681,18 @@ export class WriterAgent extends BaseAgent {
       "",
       output.content,
     ].join("\n");
+
+    await writeFile(join(chaptersDir, filename), chapterContent, "utf-8");
+  }
+
+  async savePrimaryTruthFiles(
+    bookDir: string,
+    output: WriteChapterOutput,
+    numericalSystem: boolean = true,
+    language: "zh" | "en" = "zh",
+  ): Promise<void> {
+    const storyDir = join(bookDir, "story");
+    await mkdir(storyDir, { recursive: true });
     const runtimeStateArtifacts = await this.resolveRuntimeStateArtifactsForOutput(
       bookDir,
       output,
@@ -678,7 +700,6 @@ export class WriterAgent extends BaseAgent {
     );
 
     const writes: Array<Promise<void>> = [
-      writeFile(join(chaptersDir, filename), chapterContent, "utf-8"),
       writeFile(join(storyDir, "current_state.md"), runtimeStateArtifacts?.currentStateMarkdown ?? output.updatedState, "utf-8"),
       writeFile(join(storyDir, "pending_hooks.md"), runtimeStateArtifacts?.hooksMarkdown ?? output.updatedHooks, "utf-8"),
     ];
@@ -1192,7 +1213,6 @@ ${overrides}\n`;
     if (
       safeDelta === output.runtimeStateDelta
       && output.runtimeStateSnapshot
-      && output.updatedChapterSummaries
       && output.updatedState
       && output.updatedHooks
     ) {
@@ -1201,7 +1221,8 @@ ${overrides}\n`;
         resolvedDelta: safeDelta,
         currentStateMarkdown: output.updatedState,
         hooksMarkdown: output.updatedHooks,
-        chapterSummariesMarkdown: output.updatedChapterSummaries,
+        chapterSummariesMarkdown: output.updatedChapterSummaries
+          ?? renderChapterSummariesProjection(output.runtimeStateSnapshot.chapterSummaries, language),
       };
     }
 

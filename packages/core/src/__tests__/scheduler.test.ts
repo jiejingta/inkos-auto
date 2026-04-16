@@ -244,6 +244,66 @@ describe("Scheduler", () => {
     );
   });
 
+  it("pauses immediately on non-retryable runtime authentication errors", async () => {
+    const onError = vi.fn();
+    const onPause = vi.fn();
+    const logger = {
+      child: vi.fn(),
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+    };
+    logger.child.mockReturnValue(logger);
+
+    const scheduler = new Scheduler({
+      ...createConfig(),
+      logger: logger as unknown as SchedulerConfig["logger"],
+      onError,
+      onPause,
+    });
+    const bookConfig: BookConfig = {
+      id: "book-1",
+      title: "Book 1",
+      platform: "other",
+      genre: "other",
+      status: "active",
+      targetChapters: 10,
+      chapterWordCount: 2200,
+      createdAt: "2026-04-01T00:00:00.000Z",
+      updatedAt: "2026-04-01T00:00:00.000Z",
+    };
+
+    vi.spyOn((scheduler as unknown as {
+      state: {
+        loadChapterIndex: (bookId: string) => Promise<unknown>;
+      };
+    }).state, "loadChapterIndex").mockResolvedValue([]);
+
+    vi.spyOn(
+      (scheduler as unknown as { pipeline: { writeNextChapter: (bookId: string, words?: number, temp?: number) => Promise<unknown> } }).pipeline,
+      "writeNextChapter",
+    ).mockRejectedValue(new Error("API 返回 401 (未授权)。请检查 .env 中的 INKOS_LLM_API_KEY 是否正确。"));
+
+    const success = await (
+      scheduler as unknown as {
+        writeOneChapter: (bookId: string, bookConfig: BookConfig) => Promise<boolean>;
+      }
+    ).writeOneChapter("book-1", bookConfig);
+
+    expect(success).toBe(false);
+    expect(scheduler.isBookPaused("book-1")).toBe(true);
+    expect(onPause).toHaveBeenCalledWith(
+      "book-1",
+      expect.stringContaining("non-retryable runtime error: API 返回 401"),
+    );
+    expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining("runtime failure"));
+    expect(onError).toHaveBeenCalledWith(
+      "book-1",
+      expect.objectContaining({ message: expect.stringContaining("API 返回 401") }),
+    );
+  });
+
   it("uses a 20-retry autonomous audit budget by default", () => {
     const scheduler = new Scheduler(createConfig());
     expect((scheduler as unknown as { gates: { maxAuditRetries: number; pauseAfterConsecutiveFailures: number } }).gates)

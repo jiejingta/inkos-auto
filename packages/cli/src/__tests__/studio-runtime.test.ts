@@ -22,7 +22,7 @@ describe("studio runtime resolution", () => {
     "/repo",
     "test-project",
     "node_modules",
-    "@actalk",
+    "@jiejingtazhu",
     "inkos-studio",
     "dist",
     "api",
@@ -31,7 +31,7 @@ describe("studio runtime resolution", () => {
   const cliBuiltEntry = join(
     cliPackageRoot,
     "node_modules",
-    "@actalk",
+    "@jiejingtazhu",
     "inkos-studio",
     "dist",
     "api",

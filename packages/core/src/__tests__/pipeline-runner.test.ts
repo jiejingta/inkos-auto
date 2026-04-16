@@ -1826,15 +1826,16 @@ describe("PipelineRunner", () => {
     const storyDir = join(state.bookDir(bookId), "story");
     const draftBody = "甲".repeat(210);
     const revisedBody = "乙".repeat(215);
+    const officialState = createStateCard({
+      chapter: 0,
+      location: "Ashen ferry crossing",
+      protagonistState: "Lin Yue still hides the oath token.",
+      goal: "Find the vanished mentor.",
+      conflict: "The mentor debt is still personal.",
+    });
 
     await Promise.all([
-      writeFile(join(storyDir, "current_state.md"), createStateCard({
-        chapter: 0,
-        location: "Ashen ferry crossing",
-        protagonistState: "Lin Yue still hides the oath token.",
-        goal: "Find the vanished mentor.",
-        conflict: "The mentor debt is still personal.",
-      }), "utf-8"),
+      writeFile(join(storyDir, "current_state.md"), officialState, "utf-8"),
       writeFile(join(storyDir, "pending_hooks.md"), "# Pending Hooks\n", "utf-8"),
     ]);
 
@@ -1876,6 +1877,7 @@ describe("PipelineRunner", () => {
     try {
       const result = await runner.writeNextChapter(bookId, 220);
       const savedIndex = await state.loadChapterIndex(bookId);
+      const stageStoryDir = join(state.reviewStageBookDir(bookId, 1), "story");
 
       expect(result.status).toBe("audit-failed");
       expect(result.auditResult.summary).toBe("needs revision");
@@ -1883,6 +1885,9 @@ describe("PipelineRunner", () => {
       expect(savedIndex[0]?.auditIssues).toEqual([
         `[critical] ${CRITICAL_ISSUE.category}: ${CRITICAL_ISSUE.description}`,
       ]);
+      await expect(readFile(join(storyDir, "current_state.md"), "utf-8")).resolves.toBe(officialState.trimEnd());
+      await expect(readFile(join(stageStoryDir, "current_state.md"), "utf-8")).resolves.toBe("analyzed state");
+      await expect(readFile(join(stageStoryDir, "pending_hooks.md"), "utf-8")).resolves.toBe("analyzed hooks");
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -2480,6 +2485,98 @@ describe("PipelineRunner", () => {
     ]);
 
     await expect(runner.writeNextChapter(bookId)).rejects.toThrow(/state-degraded/i);
+
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("blocks writing a new chapter when history contains an unapproved reviewable chapter", async () => {
+    const { root, runner, state, bookId } = await createRunnerFixture({
+      inputGovernanceMode: "legacy",
+    });
+    const now = "2026-03-19T00:00:00.000Z";
+    const storyDir = join(state.bookDir(bookId), "story");
+
+    await Promise.all([
+      writeFile(join(storyDir, "current_state.md"), "stable state", "utf-8"),
+      writeFile(join(storyDir, "pending_hooks.md"), "stable hooks", "utf-8"),
+      state.saveChapterIndex(bookId, [{
+        number: 1,
+        title: "Needs Approval",
+        status: "ready-for-review" as ChapterMeta["status"],
+        wordCount: 1234,
+        createdAt: now,
+        updatedAt: now,
+        auditIssues: [],
+        lengthWarnings: [],
+      }]),
+      writeFile(join(state.bookDir(bookId), "chapters", "0001_Needs_Approval.md"), "# 第1章 Needs Approval\n\nbody", "utf-8"),
+    ]);
+
+    await expect(runner.writeNextChapter(bookId)).rejects.toThrow(/Approve, reject, or revise pending chapters/i);
+
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("promotes staged review truth when approving an audit-failed chapter", async () => {
+    const { root, runner, state, bookId } = await createRunnerFixture({
+      inputGovernanceMode: "legacy",
+    });
+    const now = "2026-03-19T00:00:00.000Z";
+    const storyDir = join(state.bookDir(bookId), "story");
+    const stageBookDir = await state.resetReviewStage(bookId, 1);
+    const stageStoryDir = join(stageBookDir, "story");
+
+    await Promise.all([
+      writeFile(join(storyDir, "current_state.md"), createStateCard({
+        chapter: 0,
+        location: "Dock Nine",
+        protagonistState: "Tarin still carries the sealed packet.",
+        goal: "Find Captain Voss.",
+        conflict: "The berth is wrong and the crew is missing.",
+      }), "utf-8"),
+      writeFile(join(storyDir, "pending_hooks.md"), "# Pending Hooks\n", "utf-8"),
+      state.saveChapterIndex(bookId, [{
+        number: 1,
+        title: "Pending Approval",
+        status: "audit-failed" as ChapterMeta["status"],
+        wordCount: 1234,
+        createdAt: now,
+        updatedAt: now,
+        auditIssues: ["[warning] continuity: still rough"],
+        lengthWarnings: [],
+      }]),
+      writeFile(join(state.bookDir(bookId), "chapters", "0001_Pending_Approval.md"), "# 第1章 Pending Approval\n\nbody", "utf-8"),
+      mkdir(stageStoryDir, { recursive: true }),
+      writeFile(join(stageStoryDir, "current_state.md"), createStateCard({
+        chapter: 1,
+        location: "Dock Nine",
+        protagonistState: "Tarin still carries the sealed packet.",
+        goal: "Find Captain Voss.",
+        conflict: "The berth is wrong and the crew is missing.",
+      }), "utf-8"),
+      writeFile(join(stageStoryDir, "pending_hooks.md"), [
+        "| hook_id | start_chapter | type | status | last_advanced | expected_payoff | notes |",
+        "| --- | --- | --- | --- | --- | --- | --- |",
+        "| berth-signal | 1 | mystery | open | 1 | 3 | Needs follow-up |",
+        "",
+      ].join("\n"), "utf-8"),
+      writeFile(join(stageStoryDir, "chapter_summaries.md"), [
+        "| chapter | title | characters | events | stateChanges | hookActivity | mood | chapterType |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| 1 | Pending Approval | Tarin | He checks the berth signal | The berth stays wrong | berth-signal seeded | tense | mainline |",
+        "",
+      ].join("\n"), "utf-8"),
+    ]);
+
+    const result = await runner.approveChapter(bookId, 1);
+    const savedIndex = await state.loadChapterIndex(bookId);
+
+    expect(result.promotedReviewStage).toBe(true);
+    expect(savedIndex[0]?.status).toBe("approved");
+    await expect(readFile(join(storyDir, "current_state.md"), "utf-8")).resolves.toContain("| Current Chapter | 1 |");
+    await expect(readFile(join(storyDir, "pending_hooks.md"), "utf-8")).resolves.toContain("berth-signal");
+    await expect(stat(join(storyDir, "snapshots", "1", "current_state.md"))).resolves.toBeTruthy();
+    await expect(stat(state.reviewStageRoot(bookId))).rejects.toThrow();
 
     await rm(root, { recursive: true, force: true });
   });
@@ -3648,7 +3745,7 @@ describe("PipelineRunner", () => {
       {
         number: 1,
         title: "旧路",
-        status: "ready-for-review",
+        status: "approved",
         wordCount: 36,
         createdAt: now,
         updatedAt: now,
@@ -3658,7 +3755,7 @@ describe("PipelineRunner", () => {
       {
         number: 2,
         title: "暗巷",
-        status: "ready-for-review",
+        status: "approved",
         wordCount: 36,
         createdAt: now,
         updatedAt: now,
@@ -3883,7 +3980,7 @@ describe("PipelineRunner", () => {
     await state.saveChapterIndex(bookId, [{
       number: 1,
       title: "回声",
-      status: "ready-for-review",
+      status: "approved",
       wordCount: 12,
       createdAt: now,
       updatedAt: now,
@@ -3938,7 +4035,7 @@ describe("PipelineRunner", () => {
     await state.saveChapterIndex(bookId, [{
       number: 1,
       title: "回声",
-      status: "ready-for-review",
+      status: "approved",
       wordCount: 12,
       createdAt: now,
       updatedAt: now,

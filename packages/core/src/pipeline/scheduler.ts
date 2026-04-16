@@ -42,6 +42,27 @@ function normalizeError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
 }
 
+function isNonRetryableRuntimeError(error: Error): boolean {
+  const message = error.message.toLowerCase();
+  return (
+    message.includes("api 返回 401")
+    || message.includes("api 返回 403")
+    || message.includes("could not resolve authentication method")
+    || message.includes("model_not_found")
+    || message.includes("model not found")
+    || message.includes("baseurl 地址不正确")
+    || message.includes("inkos_llm_api_key not set")
+  );
+}
+
+function summarizePauseReason(error: Error): string {
+  const firstLine = error.message
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line.length > 0);
+  return firstLine ?? error.message;
+}
+
 function formatErrorForLog(error: Error): string {
   const stack = error.stack?.trim();
   if (!stack) {
@@ -312,7 +333,15 @@ export class Scheduler {
       const error = normalizeError(e);
       this.log?.error(`${bookId} write attempt crashed: ${formatErrorForLog(error)}`);
       this.config.onError?.(bookId, error);
-      await this.handleAuditFailure(bookId, 0);
+      if (isNonRetryableRuntimeError(error)) {
+        await this.pauseBookImmediately(
+          bookId,
+          `non-retryable runtime error: ${summarizePauseReason(error)}`,
+          0,
+        );
+        return false;
+      }
+      await this.handleRuntimeFailure(bookId, 0);
       return false;
     }
   }
@@ -434,6 +463,23 @@ export class Scheduler {
     chapterNumber: number,
     issueCategories: ReadonlyArray<string> = [],
   ): Promise<void> {
+    await this.recordFailure(bookId, chapterNumber, issueCategories, "audit");
+  }
+
+  private async handleRuntimeFailure(
+    bookId: string,
+    chapterNumber: number,
+    issueCategories: ReadonlyArray<string> = [],
+  ): Promise<void> {
+    await this.recordFailure(bookId, chapterNumber, issueCategories, "runtime");
+  }
+
+  private async recordFailure(
+    bookId: string,
+    chapterNumber: number,
+    issueCategories: ReadonlyArray<string>,
+    kind: "audit" | "runtime",
+  ): Promise<void> {
     const failures = (this.consecutiveFailures.get(bookId) ?? 0) + 1;
     this.consecutiveFailures.set(bookId, failures);
 
@@ -455,28 +501,41 @@ export class Scheduler {
     }
 
     const gates = this.gates;
+    const failureLabel = kind === "runtime" ? "runtime failure" : "audit failed";
 
     if (failures <= gates.maxAuditRetries) {
-      this.log?.warn(`${bookId} audit failed (${failures}/${gates.maxAuditRetries}), will retry`);
+      this.log?.warn(`${bookId} ${failureLabel} (${failures}/${gates.maxAuditRetries}), will retry`);
       return;
     }
 
     // Check if we should pause
     if (failures >= gates.pauseAfterConsecutiveFailures) {
-      this.pausedBooks.add(bookId);
-      const reason = `${failures} consecutive audit failures (threshold: ${gates.pauseAfterConsecutiveFailures})`;
-      this.log?.error(`${bookId} PAUSED: ${reason}`);
-      this.config.onPause?.(bookId, reason);
+      const reason = `${failures} consecutive ${failureLabel}s (threshold: ${gates.pauseAfterConsecutiveFailures})`;
+      await this.pauseBookImmediately(bookId, reason, chapterNumber, failures);
+    }
+  }
 
-      if (this.config.notifyChannels && this.config.notifyChannels.length > 0) {
-        await dispatchWebhookEvent(this.config.notifyChannels, {
-          event: "pipeline-error",
-          bookId,
-          chapterNumber: chapterNumber > 0 ? chapterNumber : undefined,
-          timestamp: new Date().toISOString(),
-          data: { reason, consecutiveFailures: failures },
-        });
-      }
+  private async pauseBookImmediately(
+    bookId: string,
+    reason: string,
+    chapterNumber: number,
+    consecutiveFailures?: number,
+  ): Promise<void> {
+    this.pausedBooks.add(bookId);
+    this.log?.error(`${bookId} PAUSED: ${reason}`);
+    this.config.onPause?.(bookId, reason);
+
+    if (this.config.notifyChannels && this.config.notifyChannels.length > 0) {
+      await dispatchWebhookEvent(this.config.notifyChannels, {
+        event: "pipeline-error",
+        bookId,
+        chapterNumber: chapterNumber > 0 ? chapterNumber : undefined,
+        timestamp: new Date().toISOString(),
+        data: {
+          reason,
+          ...(consecutiveFailures === undefined ? {} : { consecutiveFailures }),
+        },
+      });
     }
   }
 

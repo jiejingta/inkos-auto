@@ -56,6 +56,17 @@ const SEQUENCE_LEVEL_CATEGORIES = new Set([
   "Ending Pattern Repetition", "结尾同构",
 ]);
 
+const FORWARD_WRITE_APPROVED_STATUSES = new Set<ChapterMeta["status"]>([
+  "approved",
+  "published",
+  "imported",
+]);
+
+const REVIEWABLE_CHAPTER_STATUSES = new Set<ChapterMeta["status"]>([
+  "ready-for-review",
+  "audit-failed",
+]);
+
 function isSequenceLevelCategory(category: string): boolean {
   return SEQUENCE_LEVEL_CATEGORIES.has(category);
 }
@@ -1046,25 +1057,37 @@ export class PipelineRunner {
         "utf-8",
       );
 
-      // Update truth files
-      const storyDir = join(bookDir, "story");
-      if (reviseOutput.updatedState !== "(状态卡未更新)") {
-        await writeFile(join(storyDir, "current_state.md"), reviseOutput.updatedState, "utf-8");
+      const persistRevisionTruth = async (targetBookDir: string): Promise<void> => {
+        const targetStoryDir = join(targetBookDir, "story");
+        await mkdir(targetStoryDir, { recursive: true });
+        if (reviseOutput.updatedState !== "(状态卡未更新)") {
+          await writeFile(join(targetStoryDir, "current_state.md"), reviseOutput.updatedState, "utf-8");
+        }
+        if (gp.numericalSystem && reviseOutput.updatedLedger && reviseOutput.updatedLedger !== "(账本未更新)") {
+          await writeFile(join(targetStoryDir, "particle_ledger.md"), reviseOutput.updatedLedger, "utf-8");
+        }
+        if (reviseOutput.updatedHooks !== "(伏笔池未更新)") {
+          await writeFile(join(targetStoryDir, "pending_hooks.md"), reviseOutput.updatedHooks, "utf-8");
+        }
+      };
+
+      const resolvedRevisionStatus = effectivePostRevision.auditResult.passed ? "ready-for-review" : "audit-failed";
+      if (resolvedRevisionStatus === "ready-for-review") {
+        await persistRevisionTruth(bookDir);
+        await this.state.discardReviewStage(bookId);
+        await this.syncLegacyStructuredStateFromMarkdown(bookDir, targetChapter);
+      } else {
+        const stageBookDir = await this.state.resetReviewStage(bookId, targetChapter);
+        await persistRevisionTruth(stageBookDir);
+        await this.syncLegacyStructuredStateFromMarkdown(stageBookDir, targetChapter);
       }
-      if (gp.numericalSystem && reviseOutput.updatedLedger && reviseOutput.updatedLedger !== "(账本未更新)") {
-        await writeFile(join(storyDir, "particle_ledger.md"), reviseOutput.updatedLedger, "utf-8");
-      }
-      if (reviseOutput.updatedHooks !== "(伏笔池未更新)") {
-        await writeFile(join(storyDir, "pending_hooks.md"), reviseOutput.updatedHooks, "utf-8");
-      }
-      await this.syncLegacyStructuredStateFromMarkdown(bookDir, targetChapter);
 
       // Update index
       const updatedIndex = index.map((ch) =>
         ch.number === targetChapter
           ? {
               ...ch,
-              status: (effectivePostRevision.auditResult.passed ? "ready-for-review" : "audit-failed") as ChapterMeta["status"],
+              status: resolvedRevisionStatus as ChapterMeta["status"],
               wordCount: normalizedRevision.wordCount,
               updatedAt: new Date().toISOString(),
               auditIssues: effectivePostRevision.auditResult.issues.map((i) => formatAuditIssue(i)),
@@ -1087,13 +1110,20 @@ export class PipelineRunner {
       }
 
       // Re-snapshot
-      this.logStage(stageLanguage, {
-        zh: `更新第${targetChapter}章索引与快照`,
-        en: `updating chapter index and snapshots for chapter ${targetChapter}`,
-      });
-      await this.state.snapshotState(bookId, targetChapter);
-      await this.syncNarrativeMemoryIndex(bookId);
-      await this.syncCurrentStateFactHistory(bookId, targetChapter);
+      if (resolvedRevisionStatus === "ready-for-review") {
+        this.logStage(stageLanguage, {
+          zh: `更新第${targetChapter}章索引与快照`,
+          en: `updating chapter index and snapshots for chapter ${targetChapter}`,
+        });
+        await this.state.snapshotState(bookId, targetChapter);
+        await this.syncNarrativeMemoryIndex(bookId);
+        await this.syncCurrentStateFactHistory(bookId, targetChapter);
+      } else {
+        this.logStage(stageLanguage, {
+          zh: `更新第${targetChapter}章索引并写入待审真相暂存区`,
+          en: `updating chapter index and staging pending-review truth for chapter ${targetChapter}`,
+        });
+      }
 
       await this.emitWebhook("revision-complete", bookId, targetChapter, {
         wordCount: normalizedRevision.wordCount,
@@ -1105,7 +1135,7 @@ export class PipelineRunner {
         wordCount: normalizedRevision.wordCount,
         fixedIssues: reviseOutput.fixedIssues,
         applied: true,
-        status: effectivePostRevision.auditResult.passed ? "ready-for-review" : "audit-failed",
+        status: resolvedRevisionStatus,
         lengthWarnings,
         lengthTelemetry,
       };
@@ -1137,6 +1167,98 @@ export class PipelineRunner {
       ]);
 
     return { currentState, particleLedger, pendingHooks, storyBible, volumeOutline, bookRules };
+  }
+
+  async approveChapter(bookId: string, chapterNumber: number): Promise<{
+    readonly chapterNumber: number;
+    readonly promotedReviewStage: boolean;
+  }> {
+    const releaseLock = await this.state.acquireBookLock(bookId);
+    try {
+      const index = [...(await this.state.loadChapterIndex(bookId))];
+      const targetIndex = index.findIndex((chapter) => chapter.number === chapterNumber);
+      if (targetIndex < 0) {
+        throw new Error(`Chapter ${chapterNumber} not found in "${bookId}"`);
+      }
+
+      const chapter = index[targetIndex]!;
+      const promotedReviewStage = chapter.status === "audit-failed"
+        ? await this.state.promoteReviewStage(bookId, chapterNumber)
+        : false;
+
+      if (promotedReviewStage) {
+        await this.state.snapshotState(bookId, chapterNumber);
+        await this.syncNarrativeMemoryIndex(bookId);
+        await this.syncCurrentStateFactHistory(bookId, chapterNumber);
+      }
+
+      index[targetIndex] = {
+        ...chapter,
+        status: "approved",
+        updatedAt: new Date().toISOString(),
+      };
+      await this.state.saveChapterIndex(bookId, index);
+
+      return {
+        chapterNumber,
+        promotedReviewStage,
+      };
+    } finally {
+      await releaseLock();
+    }
+  }
+
+  async approveAllPendingChapters(bookId: string): Promise<{
+    readonly approvedCount: number;
+    readonly promotedReviewStages: number;
+  }> {
+    const releaseLock = await this.state.acquireBookLock(bookId);
+    try {
+      const index = [...(await this.state.loadChapterIndex(bookId))];
+      const pending = index
+        .filter((chapter) => REVIEWABLE_CHAPTER_STATUSES.has(chapter.status))
+        .sort((left, right) => left.number - right.number);
+      if (pending.length === 0) {
+        return {
+          approvedCount: 0,
+          promotedReviewStages: 0,
+        };
+      }
+
+      let promotedReviewStages = 0;
+      const updatedIndex = [...index];
+      const now = new Date().toISOString();
+
+      for (const chapter of pending) {
+        if (chapter.status === "audit-failed") {
+          const promoted = await this.state.promoteReviewStage(bookId, chapter.number);
+          if (promoted) {
+            promotedReviewStages += 1;
+            await this.state.snapshotState(bookId, chapter.number);
+            await this.syncNarrativeMemoryIndex(bookId);
+            await this.syncCurrentStateFactHistory(bookId, chapter.number);
+          }
+        }
+
+        const targetIndex = updatedIndex.findIndex((entry) => entry.number === chapter.number);
+        if (targetIndex >= 0) {
+          updatedIndex[targetIndex] = {
+            ...updatedIndex[targetIndex]!,
+            status: "approved",
+            updatedAt: now,
+          };
+        }
+      }
+
+      await this.state.saveChapterIndex(bookId, updatedIndex);
+
+      return {
+        approvedCount: pending.length,
+        promotedReviewStages,
+      };
+    } finally {
+      await releaseLock();
+    }
   }
 
   /** Get book status overview. */
@@ -1194,7 +1316,7 @@ export class PipelineRunner {
     await this.state.ensureControlDocuments(bookId);
     const book = await this.state.loadBookConfig(bookId);
     const bookDir = this.state.bookDir(bookId);
-    await this.assertNoPendingStateRepair(bookId);
+    await this.assertNoPendingForwardWrite(bookId);
     const chapterNumber = await this.state.getNextChapterNumber(bookId);
     const stageLanguage = await this.resolveBookLanguage(book);
     this.logStage(stageLanguage, { zh: "准备章节输入", en: "preparing chapter inputs" });
@@ -1433,13 +1555,18 @@ export class PipelineRunner {
       degradedIssues,
       tokenUsage: totalUsage,
       loadChapterIndex: () => this.state.loadChapterIndex(bookId),
-      saveChapter: () => writer.saveChapter(bookDir, persistenceOutput, gp.numericalSystem, pipelineLang),
-      saveTruthFiles: async () => {
+      saveChapterManuscript: () => writer.saveChapterManuscript(bookDir, persistenceOutput, pipelineLang),
+      saveOfficialTruthFiles: async () => {
+        await writer.savePrimaryTruthFiles(bookDir, persistenceOutput, gp.numericalSystem, pipelineLang);
         await writer.saveNewTruthFiles(bookDir, persistenceOutput, pipelineLang);
         await this.syncLegacyStructuredStateFromMarkdown(bookDir, chapterNumber, persistenceOutput);
-        this.logStage(stageLanguage, { zh: "同步记忆索引", en: "syncing memory indexes" });
-        await this.syncNarrativeMemoryIndex(bookId);
       },
+      saveReviewStageTruthFiles: async () => {
+        const stageBookDir = await this.state.resetReviewStage(bookId, chapterNumber);
+        await writer.saveChapter(stageBookDir, persistenceOutput, gp.numericalSystem, pipelineLang);
+        await writer.saveNewTruthFiles(stageBookDir, persistenceOutput, pipelineLang);
+      },
+      clearReviewStageTruthFiles: () => this.state.discardReviewStage(bookId),
       saveChapterIndex: (index) => this.state.saveChapterIndex(bookId, index),
       markBookActiveIfNeeded: () => this.markBookActiveIfNeeded(bookId),
       persistAuditDriftGuidance: (issues) => this.persistAuditDriftGuidance({
@@ -1449,7 +1576,11 @@ export class PipelineRunner {
         language: stageLanguage,
       }).catch(() => undefined),
       snapshotState: () => this.state.snapshotState(bookId, chapterNumber),
-      syncCurrentStateFactHistory: () => this.syncCurrentStateFactHistory(bookId, chapterNumber),
+      syncCurrentStateFactHistory: async () => {
+        this.logStage(stageLanguage, { zh: "同步记忆索引", en: "syncing memory indexes" });
+        await this.syncNarrativeMemoryIndex(bookId);
+        await this.syncCurrentStateFactHistory(bookId, chapterNumber);
+      },
       logSnapshotStage: () =>
         this.logStage(stageLanguage, { zh: "更新章节索引与快照", en: "updating chapter index and snapshots" }),
     });
@@ -1581,14 +1712,21 @@ export class PipelineRunner {
       throw new Error(`State repair still failed for chapter ${targetChapter}.`);
     }
 
-    await writer.saveChapter(bookDir, repairedOutput, gp.numericalSystem, pipelineLang);
-    await writer.saveNewTruthFiles(bookDir, repairedOutput, pipelineLang);
-    await this.syncLegacyStructuredStateFromMarkdown(bookDir, targetChapter, repairedOutput);
-    await this.syncNarrativeMemoryIndex(bookId);
-    await this.state.snapshotState(bookId, targetChapter);
-    await this.syncCurrentStateFactHistory(bookId, targetChapter);
-
     const baseStatus = resolveStateDegradedBaseStatus(targetMeta);
+    if (baseStatus === "ready-for-review") {
+      await writer.saveChapter(bookDir, repairedOutput, gp.numericalSystem, pipelineLang);
+      await writer.saveNewTruthFiles(bookDir, repairedOutput, pipelineLang);
+      await this.state.discardReviewStage(bookId);
+      await this.syncLegacyStructuredStateFromMarkdown(bookDir, targetChapter, repairedOutput);
+      await this.syncNarrativeMemoryIndex(bookId);
+      await this.state.snapshotState(bookId, targetChapter);
+      await this.syncCurrentStateFactHistory(bookId, targetChapter);
+    } else {
+      const stageBookDir = await this.state.resetReviewStage(bookId, targetChapter);
+      await writer.saveChapter(stageBookDir, repairedOutput, gp.numericalSystem, pipelineLang);
+      await writer.saveNewTruthFiles(stageBookDir, repairedOutput, pipelineLang);
+    }
+
     const degradedMetadata = parseStateDegradedReviewNote(targetMeta.reviewNote);
     const injectedIssues = new Set(degradedMetadata?.injectedIssues ?? []);
     index[targetIndex] = {
@@ -1719,16 +1857,23 @@ export class PipelineRunner {
       throw new Error(`Chapter sync still failed for chapter ${targetChapter}.`);
     }
 
-    await writer.saveChapter(bookDir, syncedOutput, gp.numericalSystem, pipelineLang);
-    await writer.saveNewTruthFiles(bookDir, syncedOutput, pipelineLang);
-    await this.syncLegacyStructuredStateFromMarkdown(bookDir, targetChapter, syncedOutput);
-    await this.syncNarrativeMemoryIndex(bookId);
-    await this.state.snapshotState(bookId, targetChapter);
-    await this.syncCurrentStateFactHistory(bookId, targetChapter);
-
     const finalStatus: "ready-for-review" | "audit-failed" = targetMeta.status === "state-degraded"
       ? resolveStateDegradedBaseStatus(targetMeta)
       : "ready-for-review";
+
+    if (finalStatus === "ready-for-review") {
+      await writer.saveChapter(bookDir, syncedOutput, gp.numericalSystem, pipelineLang);
+      await writer.saveNewTruthFiles(bookDir, syncedOutput, pipelineLang);
+      await this.state.discardReviewStage(bookId);
+      await this.syncLegacyStructuredStateFromMarkdown(bookDir, targetChapter, syncedOutput);
+      await this.syncNarrativeMemoryIndex(bookId);
+      await this.state.snapshotState(bookId, targetChapter);
+      await this.syncCurrentStateFactHistory(bookId, targetChapter);
+    } else {
+      const stageBookDir = await this.state.resetReviewStage(bookId, targetChapter);
+      await writer.saveChapter(stageBookDir, syncedOutput, gp.numericalSystem, pipelineLang);
+      await writer.saveNewTruthFiles(stageBookDir, syncedOutput, pipelineLang);
+    }
 
     if (targetMeta.status === "state-degraded") {
       const degradedMetadata = parseStateDegradedReviewNote(targetMeta.reviewNote);
@@ -2229,15 +2374,25 @@ ${matrix}`;
     };
   }
 
-  private async assertNoPendingStateRepair(bookId: string): Promise<void> {
+  private async assertNoPendingForwardWrite(bookId: string): Promise<void> {
     const existingIndex = await this.state.loadChapterIndex(bookId);
-    const latestChapter = [...existingIndex].sort((left, right) => right.number - left.number)[0];
-    if (latestChapter?.status !== "state-degraded") {
+    const chaptersByNumber = [...existingIndex].sort((left, right) => left.number - right.number);
+    const latestChapter = chaptersByNumber[chaptersByNumber.length - 1];
+    if (latestChapter?.status === "state-degraded") {
+      throw new Error(
+        `Latest chapter ${latestChapter.number} is state-degraded. Repair state or rewrite that chapter before continuing.`,
+      );
+    }
+
+    const blockingChapter = chaptersByNumber.find(
+      (chapter) => !FORWARD_WRITE_APPROVED_STATUSES.has(chapter.status),
+    );
+    if (!blockingChapter) {
       return;
     }
 
     throw new Error(
-      `Latest chapter ${latestChapter.number} is state-degraded. Repair state or rewrite that chapter before continuing.`,
+      `Chapter ${blockingChapter.number} is ${blockingChapter.status}. Approve, reject, or revise pending chapters before writing a new chapter.`,
     );
   }
 

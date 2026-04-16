@@ -1,4 +1,4 @@
-import type { InteractionIntentType } from "@actalk/inkos-core";
+import type { InteractionIntentType } from "@jiejingtazhu/inkos-core";
 import type { TuiCopy } from "./i18n.js";
 
 export interface ActivityState {

@@ -1,5 +1,5 @@
 import { Command } from "commander";
-import { StateManager, formatLengthCount, readGenreProfile, resolveLengthCountingMode } from "@actalk/inkos-core";
+import { PipelineRunner, StateManager, formatLengthCount, readGenreProfile, resolveLengthCountingMode } from "@jiejingtazhu/inkos-core";
 import { findProjectRoot, resolveBookId, log, logError } from "../utils.js";
 
 export const reviewCommand = new Command("review")
@@ -104,6 +104,39 @@ function parseBookAndChapter(
   throw new Error("Usage: inkos review approve [book-id] <chapter>");
 }
 
+function createHeadlessReviewPipeline(root: string): PipelineRunner {
+  return new PipelineRunner({
+    client: {
+      provider: "openai",
+      apiFormat: "chat",
+      stream: false,
+      defaults: {
+        temperature: 0.7,
+        maxTokens: 4096,
+        thinkingBudget: 0,
+        maxTokensCap: null,
+      },
+    } as ConstructorParameters<typeof PipelineRunner>[0]["client"],
+    model: "headless-review",
+    projectRoot: root,
+  });
+}
+
+type ReviewApprovalPipeline = PipelineRunner & {
+  approveChapter: (bookId: string, chapterNumber: number) => Promise<{
+    readonly chapterNumber: number;
+    readonly promotedReviewStage: boolean;
+  }>;
+  approveAllPendingChapters: (bookId: string) => Promise<{
+    readonly approvedCount: number;
+    readonly promotedReviewStages: number;
+  }>;
+};
+
+type ReviewStageManager = StateManager & {
+  discardReviewStage: (bookId: string, chapterNumber?: number) => Promise<void>;
+};
+
 reviewCommand
   .command("approve")
   .description("Approve a chapter and commit its state: approve [book-id] <chapter>")
@@ -115,24 +148,22 @@ reviewCommand
       const { bookIdArg, chapterNum } = parseBookAndChapter(args);
       const bookId = await resolveBookId(bookIdArg, root);
 
-      const state = new StateManager(root);
-      const index = [...(await state.loadChapterIndex(bookId))];
-      const idx = index.findIndex((ch) => ch.number === chapterNum);
-      if (idx === -1) {
-        throw new Error(`Chapter ${chapterNum} not found in "${bookId}"`);
-      }
-
-      index[idx] = {
-        ...index[idx]!,
-        status: "approved",
-        updatedAt: new Date().toISOString(),
-      };
-      await state.saveChapterIndex(bookId, index);
+      const pipeline = createHeadlessReviewPipeline(root) as ReviewApprovalPipeline;
+      const result = await pipeline.approveChapter(bookId, chapterNum);
 
       if (opts.json) {
-        log(JSON.stringify({ bookId, chapter: chapterNum, status: "approved" }));
+        log(JSON.stringify({
+          bookId,
+          chapter: chapterNum,
+          status: "approved",
+          promotedReviewStage: result.promotedReviewStage,
+        }));
       } else {
-        log(`Chapter ${chapterNum} approved (state committed).`);
+        log(
+          result.promotedReviewStage
+            ? `Chapter ${chapterNum} approved (staged truth committed).`
+            : `Chapter ${chapterNum} approved (state committed).`,
+        );
       }
     } catch (e) {
       if (opts.json) {
@@ -153,26 +184,21 @@ reviewCommand
     try {
       const root = findProjectRoot();
       const bookId = await resolveBookId(bookIdArg, root);
-      const state = new StateManager(root);
-
-      const index = [...(await state.loadChapterIndex(bookId))];
-      let count = 0;
-      const now = new Date().toISOString();
-
-      const updated = index.map((ch) => {
-        if (ch.status === "ready-for-review" || ch.status === "audit-failed") {
-          count++;
-          return { ...ch, status: "approved" as const, updatedAt: now };
-        }
-        return ch;
-      });
-
-      await state.saveChapterIndex(bookId, updated);
+      const pipeline = createHeadlessReviewPipeline(root) as ReviewApprovalPipeline;
+      const result = await pipeline.approveAllPendingChapters(bookId);
 
       if (opts.json) {
-        log(JSON.stringify({ bookId, approvedCount: count }));
+        log(JSON.stringify({
+          bookId,
+          approvedCount: result.approvedCount,
+          promotedReviewStages: result.promotedReviewStages,
+        }));
       } else {
-        log(`${count} chapter(s) approved.`);
+        log(
+          result.promotedReviewStages > 0
+            ? `${result.approvedCount} chapter(s) approved, ${result.promotedReviewStages} staged truth set(s) committed.`
+            : `${result.approvedCount} chapter(s) approved.`,
+        );
       }
     } catch (e) {
       if (opts.json) {
@@ -197,7 +223,7 @@ reviewCommand
       const { bookIdArg, chapterNum } = parseBookAndChapter(args);
       const bookId = await resolveBookId(bookIdArg, root);
 
-      const state = new StateManager(root);
+      const state = new StateManager(root) as ReviewStageManager;
       const index = await state.loadChapterIndex(bookId);
       const idx = index.findIndex((ch) => ch.number === chapterNum);
       if (idx === -1) {
@@ -214,6 +240,7 @@ reviewCommand
           updatedAt: new Date().toISOString(),
         };
         await state.saveChapterIndex(bookId, updated);
+        await state.discardReviewStage(bookId, chapterNum);
 
         if (opts.json) {
           log(JSON.stringify({ bookId, chapter: chapterNum, status: "rejected", discarded: [] }));

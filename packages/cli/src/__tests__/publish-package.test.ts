@@ -1,6 +1,6 @@
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
@@ -35,9 +35,8 @@ async function packPackage(packageDir: string, packDir: string) {
 
 async function extractPackedPackageJson(packageDir: string, packDir: string) {
   const tarballPath = await packPackage(packageDir, packDir);
-  const tarArgs = process.platform === "win32" ? ["--force-local", "-xOf"] : ["-xOf"];
-  return execFileSync("tar", [...tarArgs, tarballPath, "package/package.json"], {
-    cwd: workspaceRoot,
+  return execFileSync("tar", ["-xOf", basename(tarballPath), "package/package.json"], {
+    cwd: packDir,
     encoding: "utf-8",
   });
 }
@@ -59,16 +58,16 @@ describe.sequential("publish packaging", () => {
       );
       await writeFile(
         join(tempCoreDir, "package.json"),
-        `${JSON.stringify({ name: "@actalk/inkos-core", version: "0.4.6" }, null, 2)}\n`,
+        `${JSON.stringify({ name: "@jiejingtazhu/inkos-core", version: "0.4.6" }, null, 2)}\n`,
       );
       await writeFile(
         join(tempCliDir, "package.json"),
         `${JSON.stringify(
           {
-            name: "@actalk/inkos",
+            name: "@jiejingtazhu/inkos",
             version: "0.4.6",
             dependencies: {
-              "@actalk/inkos-core": "workspace:*",
+              "@jiejingtazhu/inkos-core": "workspace:*",
               commander: "^13.0.0",
             },
           },
@@ -94,7 +93,7 @@ describe.sequential("publish packaging", () => {
       expect(rootPackageJson.version).toBe("0.4.8-canary.7");
       expect(corePackageJson.version).toBe("0.4.8-canary.7");
       expect(cliPackageJson.version).toBe("0.4.8-canary.7");
-      expect(cliPackageJson.dependencies["@actalk/inkos-core"]).toBe("0.4.8-canary.7");
+      expect(cliPackageJson.dependencies["@jiejingtazhu/inkos-core"]).toBe("0.4.8-canary.7");
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }
@@ -103,8 +102,8 @@ describe.sequential("publish packaging", () => {
   it("keeps source CLI dependencies linked through the workspace protocol", async () => {
     const cliPackageJson = await sourceCliPackageJsonPromise;
 
-    expect(cliPackageJson.dependencies["@actalk/inkos-core"]).toBe("workspace:*");
-    expect(cliPackageJson.dependencies["@actalk/inkos-studio"]).toBe("workspace:*");
+    expect(cliPackageJson.dependencies["@jiejingtazhu/inkos-core"]).toBe("workspace:*");
+    expect(cliPackageJson.dependencies["@jiejingtazhu/inkos-studio"]).toBe("workspace:*");
   });
 
   it("verifies publishable manifests before npm publish runs", async () => {
@@ -137,16 +136,16 @@ describe.sequential("publish packaging", () => {
       );
       await writeFile(
         join(tempCoreDir, "package.json"),
-        `${JSON.stringify({ name: "@actalk/inkos-core", version: "0.5.1" }, null, 2)}\n`,
+        `${JSON.stringify({ name: "@jiejingtazhu/inkos-core", version: "0.5.1" }, null, 2)}\n`,
       );
       await writeFile(
         join(tempCliDir, "package.json"),
         `${JSON.stringify(
           {
-            name: "@actalk/inkos",
+            name: "@jiejingtazhu/inkos",
             version: "0.5.1",
             dependencies: {
-              "@actalk/inkos-core": "workspace:*",
+              "@jiejingtazhu/inkos-core": "workspace:*",
               commander: "^13.0.0",
             },
           },
@@ -187,16 +186,16 @@ describe.sequential("publish packaging", () => {
       );
       await writeFile(
         join(tempCoreDir, "package.json"),
-        `${JSON.stringify({ name: "@actalk/inkos-core", version: "0.5.1" }, null, 2)}\n`,
+        `${JSON.stringify({ name: "@jiejingtazhu/inkos-core", version: "0.5.1" }, null, 2)}\n`,
       );
       await writeFile(
         join(tempCliDir, "package.json"),
         `${JSON.stringify(
           {
-            name: "@actalk/inkos",
+            name: "@jiejingtazhu/inkos",
             version: "0.5.1",
             dependencies: {
-              "@actalk/inkos-core": "workspace:0.5.0",
+              "@jiejingtazhu/inkos-core": "workspace:0.5.0",
             },
           },
           null,
@@ -230,8 +229,8 @@ describe.sequential("publish packaging", () => {
       );
       const studioPackageJson = await sourceStudioPackageJsonPromise;
 
-      expect(packedPackageJson.dependencies["@actalk/inkos-core"]).toBe(corePackageJson.version);
-      expect(packedPackageJson.dependencies["@actalk/inkos-studio"]).toBe(studioPackageJson.version);
+      expect(packedPackageJson.dependencies["@jiejingtazhu/inkos-core"]).toBe(corePackageJson.version);
+      expect(packedPackageJson.dependencies["@jiejingtazhu/inkos-studio"]).toBe(studioPackageJson.version);
     } finally {
       await rm(packDir, { recursive: true, force: true });
     }
@@ -242,9 +241,8 @@ describe.sequential("publish packaging", () => {
 
     try {
       const tarballPath = await packPackage(studioDir, packDir);
-      const tarArgs = process.platform === "win32" ? ["--force-local", "-tf"] : ["-tf"];
-      const archiveListing = execFileSync("tar", [...tarArgs, tarballPath], {
-        cwd: workspaceRoot,
+      const archiveListing = execFileSync("tar", ["-tf", basename(tarballPath)], {
+        cwd: packDir,
         encoding: "utf-8",
       });
 

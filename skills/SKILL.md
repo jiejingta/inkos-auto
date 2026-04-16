@@ -2,7 +2,7 @@
 name: inkos
 description: Autonomous novel writing CLI agent with web workbench (InkOS Studio) - use for creative fiction writing, novel generation, style imitation, chapter continuation/import, EPUB export, AIGC detection, and fan fiction. Native English support with 10 built-in English genre profiles (LitRPG, Progression Fantasy, Isekai, Cultivation, System Apocalypse, Dungeon Core, Romantasy, Sci-Fi, Tower Climber, Cozy Fantasy). Also supports Chinese web novel genres (xuanhuan, xianxia, urban, horror, other). Multi-agent pipeline, two-phase writer (creative + settlement), 33-dimension auditing, token usage analytics, creative brief input, structured logging (JSON Lines), multi-model routing, custom OpenAI-compatible provider support, and InkOS Studio web UI for visual book management, chapter review, real-time writing progress, market radar, and analytics.
 version: 2.3.2
-metadata: { "openclaw": { "emoji": "📖", "requires": { "bins": ["inkos", "node"], "env": ["OPENAI_API_KEY"] }, "primaryEnv": "OPENAI_API_KEY", "homepage": "https://github.com/Narcooo/inkos", "install": [{ "id": "npm", "kind": "node", "package": "@actalk/inkos", "label": "Install InkOS (npm)" }] } }
+metadata: { "openclaw": { "emoji": "📖", "requires": { "bins": ["inkos", "node"], "env": ["OPENAI_API_KEY"] }, "primaryEnv": "OPENAI_API_KEY", "homepage": "https://github.com/jiejingta/inkos-auto", "install": [{ "id": "npm", "kind": "node", "package": "@jiejingtazhu/inkos", "label": "Install InkOS (npm)" }] } }
 ---
 
 # InkOS - Autonomous Novel Writing Agent
@@ -566,7 +566,7 @@ inkos down
 
 ## Security & Trust
 
-- **License**: the ClawHub skill descriptor is MIT-0 per platform policy, but the underlying `@actalk/inkos`, `@actalk/inkos-core`, and `@actalk/inkos-studio` npm packages are **AGPL-3.0-only**. Running InkOS and distributing modified versions are governed by AGPL. Full source on GitHub for auditability.
+- **License**: the ClawHub skill descriptor is MIT-0 per platform policy, but the underlying `@jiejingtazhu/inkos`, `@jiejingtazhu/inkos-core`, and `@jiejingtazhu/inkos-studio` npm packages are **AGPL-3.0-only**. Running InkOS and distributing modified versions are governed by AGPL. Full source on GitHub for auditability.
 - **No install hooks**: npm package has no `preinstall`/`postinstall`/`install` scripts. Install is inert.
 - **Local-only file I/O**: all read/write stays inside the project directory (`books/*`, `inkos.json`, `inkos.log`). No writes outside the working directory.
 - **No telemetry**: InkOS does not phone home, collect usage stats, or ship any data to InkOS-controlled servers. The only outbound traffic is to the LLM provider endpoint you explicitly configure.
@@ -576,7 +576,7 @@ inkos down
 
 ## Support & Resources
 
-- **Homepage**: https://github.com/Narcooo/inkos
+- **Homepage**: https://github.com/jiejingta/inkos-auto
 - **Configuration**: Stored in project root after `inkos init`
 - **Truth files**: Located in `books/<id>/story/` per book, with structured JSON in `story/state/`
 - **Logs**: Check output of `inkos doctor` for troubleshooting
