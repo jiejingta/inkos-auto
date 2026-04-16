@@ -1,6 +1,6 @@
 {
   "name": "@jiejingtazhu/inkos-core",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "InkOS core engine — multi-agent novel writing pipeline with 33-dimension continuity audit, style cloning, and de-AI-ification",
   "keywords": [
     "ai-novel-writing",
@@ -37,6 +37,7 @@
   "scripts": {
     "prepack": "node ../../scripts/prepare-package-for-publish.mjs",
     "postpack": "node ../../scripts/restore-package-json.mjs",
+    "postpublish": "node ../../scripts/restore-package-json.mjs",
     "prepublishOnly": "node ../../scripts/verify-no-workspace-protocol.mjs .",
     "build": "tsc",
     "dev": "tsc --watch",

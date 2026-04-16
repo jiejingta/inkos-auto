@@ -179,6 +179,8 @@ override 的持久化位置：
   - Studio 启动入口。Windows 下源码模式需要把 `tsx` loader 通过 `file://` URL 传给 `node --import`，但主入口 `.ts` 仍保持普通路径。
 - `scripts/pack-release.mjs`
   - 仓库级本地打包入口：先 `build` + `verify:publish-manifests`，再依次打出 core/studio/cli 的 npm tarball 到 `tmp/release-packages/`。
+- `scripts/restore-package-json.mjs`
+  - 发布清单恢复脚本。`npm pack` 后立即恢复；`npm publish` 时会跳过 `postpack`，等到 `postpublish` 再恢复，避免 registry 元数据继续保留 `workspace:*`。
 - `.github/workflows/ci.yml`
   - PR / push 时会额外校验 `packages/core`、`packages/studio`、`packages/cli` 的 tarball，提前拦截发布清单问题。
 - `.github/workflows/release.yml`

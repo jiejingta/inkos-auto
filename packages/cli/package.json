@@ -1,6 +1,6 @@
 {
   "name": "@jiejingtazhu/inkos",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Autonomous AI novel writing CLI agent — 10-agent pipeline that writes, audits, and revises novels with continuity tracking. Supports LitRPG, Progression Fantasy, Isekai, Romantasy, Sci-Fi and more.",
   "keywords": [
     "ai-novel-writing",
@@ -36,6 +36,7 @@
   "scripts": {
     "prepack": "node ../../scripts/prepare-package-for-publish.mjs",
     "postpack": "node ../../scripts/restore-package-json.mjs",
+    "postpublish": "node ../../scripts/restore-package-json.mjs",
     "prepublishOnly": "node ../../scripts/verify-no-workspace-protocol.mjs .",
     "build": "tsc",
     "dev": "tsc --watch",
@@ -43,8 +44,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@jiejingtazhu/inkos-core": "workspace:*",
-    "@jiejingtazhu/inkos-studio": "workspace:*",
+    "@jiejingtazhu/inkos-core": "1.2.1",
+    "@jiejingtazhu/inkos-studio": "1.2.1",
     "commander": "^13.0.0",
     "dotenv": "^16.4.0",
     "epub-gen-memory": "^1.0.10",
