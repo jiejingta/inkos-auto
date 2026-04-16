@@ -1,0 +1,113 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createInteractionToolsFromDeps } from "../interaction/project-tools.js";
+
+const mockChatCompletion = vi.hoisted(() => vi.fn());
+
+vi.mock("../index.js", async (importOriginal) => {
+  const actual = await importOriginal<Record<string, unknown>>();
+  return { ...actual, chatCompletion: mockChatCompletion };
+});
+
+const fakePipeline = {
+  config: {
+    client: {} as object,
+    model: "gpt-4o",
+  },
+  writeNextChapter: vi.fn(),
+  reviseDraft: vi.fn(),
+};
+
+const fakeState = {
+  ensureControlDocuments: vi.fn(async () => {}),
+  bookDir: vi.fn(() => "/tmp/books/test"),
+  loadBookConfig: vi.fn(async () => undefined),
+  loadChapterIndex: vi.fn(async () => []),
+  saveChapterIndex: vi.fn(async () => undefined),
+  listBooks: vi.fn(async () => []),
+};
+
+const MOCK_RESPONSE = {
+  content: JSON.stringify({
+    assistantReply: "好的，你想写都市异能，请问主角是什么类型的能力？",
+    draft: { concept: "都市异能", missingFields: ["title", "genre"], readyToCreate: false },
+  }),
+  tokensUsed: { prompt: 5, completion: 80, total: 85 },
+};
+
+describe("chat tool – maxTokens forwarding", () => {
+  beforeEach(() => {
+    mockChatCompletion.mockResolvedValue({
+      content: "Hello",
+      tokensUsed: { prompt: 5, completion: 10, total: 15 },
+    });
+    mockChatCompletion.mockClear();
+  });
+
+  it("does not pass maxTokens to chatCompletion when depth has no maxTokens set", async () => {
+    const tools = createInteractionToolsFromDeps(
+      fakePipeline as never,
+      fakeState as never,
+      {
+        getChatRequestOptions: () => ({ temperature: 0.7 }),
+      },
+    );
+
+    await tools.chat?.("你好", { bookId: "test-book", automationMode: "manual" });
+
+    expect(mockChatCompletion).toHaveBeenCalledOnce();
+    const options = mockChatCompletion.mock.calls[0]?.[3] as Record<string, unknown> | undefined;
+    expect(options).not.toHaveProperty("maxTokens");
+  });
+
+  it("passes maxTokens to chatCompletion when depth explicitly sets it", async () => {
+    const tools = createInteractionToolsFromDeps(
+      fakePipeline as never,
+      fakeState as never,
+      {
+        getChatRequestOptions: () => ({ temperature: 0.7, maxTokens: 512 }),
+      },
+    );
+
+    await tools.chat?.("你好", { bookId: "test-book", automationMode: "manual" });
+
+    expect(mockChatCompletion).toHaveBeenCalledOnce();
+    const options = mockChatCompletion.mock.calls[0]?.[3] as Record<string, unknown> | undefined;
+    expect(options).toHaveProperty("maxTokens", 512);
+  });
+
+  it("rethrows real chatCompletion errors instead of silently falling back", async () => {
+    mockChatCompletion.mockRejectedValueOnce(new Error("provider down"));
+
+    const tools = createInteractionToolsFromDeps(
+      fakePipeline as never,
+      fakeState as never,
+      {
+        getChatRequestOptions: () => ({ temperature: 0.7 }),
+      },
+    );
+
+    await expect(
+      tools.chat?.("你好", { bookId: "test-book", automationMode: "manual" }),
+    ).rejects.toThrow("provider down");
+  });
+});
+
+describe("developBookDraft – maxTokens not capped", () => {
+  beforeEach(() => {
+    mockChatCompletion.mockResolvedValue(MOCK_RESPONSE);
+    mockChatCompletion.mockClear();
+  });
+
+  it("does not pass maxTokens to chatCompletion so thinking models are not truncated", async () => {
+    const tools = createInteractionToolsFromDeps(
+      fakePipeline as never,
+      fakeState as never,
+    );
+
+    await tools.developBookDraft?.("我想写都市异能", undefined);
+
+    expect(mockChatCompletion).toHaveBeenCalledOnce();
+    const options = mockChatCompletion.mock.calls[0]?.[3] as Record<string, unknown> | undefined;
+    expect(options).not.toHaveProperty("maxTokens");
+  });
+});
