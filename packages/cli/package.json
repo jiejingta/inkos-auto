@@ -44,8 +44,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@jiejingtazhu/inkos-core": "1.2.1",
-    "@jiejingtazhu/inkos-studio": "1.2.1",
+    "@jiejingtazhu/inkos-core": "workspace:*",
+    "@jiejingtazhu/inkos-studio": "workspace:*",
     "commander": "^13.0.0",
     "dotenv": "^16.4.0",
     "epub-gen-memory": "^1.0.10",

@@ -29,7 +29,7 @@
     "typecheck": "tsc --noEmit && tsc -p tsconfig.server.json --noEmit"
   },
   "dependencies": {
-    "@jiejingtazhu/inkos-core": "1.2.1",
+    "@jiejingtazhu/inkos-core": "workspace:*",
     "@base-ui/react": "^1.3.0",
     "@hono/node-server": "^1.13.0",
     "clsx": "^2.1.1",
