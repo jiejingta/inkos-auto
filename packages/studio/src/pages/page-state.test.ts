@@ -3,9 +3,11 @@ import {
   buildCreationDraftSummary,
   canCreateFromDraft,
   defaultChapterWordsForLanguage,
+  issueDraftSyncToken,
   platformOptionsForLanguage,
   pickValidValue,
   resolveDraftInstruction,
+  shouldApplyDraftSyncResult,
   waitForBookReady,
 } from "./BookCreate";
 
@@ -101,6 +103,18 @@ describe("resolveDraftInstruction", () => {
   it("forces the first ideation turn through /new so an active book does not hijack the flow", () => {
     expect(resolveDraftInstruction("我想写个港风商战悬疑", false)).toBe("/new 我想写个港风商战悬疑");
     expect(resolveDraftInstruction("把世界观改成近未来港口城", true)).toBe("把世界观改成近未来港口城");
+  });
+});
+
+describe("draft sync tokens", () => {
+  it("advances monotonically so newer draft requests can supersede older ones", () => {
+    expect(issueDraftSyncToken(0)).toBe(1);
+    expect(issueDraftSyncToken(1)).toBe(2);
+  });
+
+  it("rejects stale draft responses once a newer request has started", () => {
+    expect(shouldApplyDraftSyncResult(2, 1)).toBe(false);
+    expect(shouldApplyDraftSyncResult(2, 2)).toBe(true);
   });
 });
 

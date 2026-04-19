@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { BookCreationDraft } from "@jiejingtazhu/inkos-core";
 import { fetchJson, useApi } from "../hooks/use-api";
 import type { Theme } from "../hooks/use-theme";
@@ -182,6 +182,14 @@ export function buildCreationDraftSummary(
   return rows.filter((row): row is DraftSummaryRow => Boolean(row));
 }
 
+export function issueDraftSyncToken(currentToken: number): number {
+  return currentToken + 1;
+}
+
+export function shouldApplyDraftSyncResult(activeToken: number, responseToken: number): boolean {
+  return activeToken === responseToken;
+}
+
 interface WaitForBookReadyOptions {
   readonly fetchBook?: (bookId: string) => Promise<unknown>;
   readonly fetchStatus?: (bookId: string) => Promise<{ status: string; error?: string }>;
@@ -256,16 +264,25 @@ export function BookCreate({ nav, theme, t }: { nav: Nav; theme: Theme; t: TFunc
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
+  const draftSyncTokenRef = useRef(0);
 
   const summaryRows = useMemo(
     () => (draft ? buildCreationDraftSummary(draft, projectLang) : []),
     [draft, projectLang],
   );
 
+  const beginDraftSync = (): number => {
+    draftSyncTokenRef.current = issueDraftSyncToken(draftSyncTokenRef.current);
+    return draftSyncTokenRef.current;
+  };
+
   const refreshDraft = async (): Promise<BookCreationDraft | undefined> => {
+    const requestToken = beginDraftSync();
     const data = await fetchJson<InteractionSessionResponse>("/interaction/session");
     const nextDraft = data.session?.creationDraft;
-    setDraft(nextDraft);
+    if (shouldApplyDraftSyncResult(draftSyncTokenRef.current, requestToken)) {
+      setDraft(nextDraft);
+    }
     return nextDraft;
   };
 
@@ -316,10 +333,14 @@ export function BookCreate({ nav, theme, t }: { nav: Nav; theme: Theme; t: TFunc
       return;
     }
 
+    const requestToken = beginDraftSync();
     setSubmitting(true);
     setError(null);
     try {
       const data = await runAgentInstruction(instruction);
+      if (!shouldApplyDraftSyncResult(draftSyncTokenRef.current, requestToken)) {
+        return;
+      }
       setInput("");
       setStatus(data.response ?? null);
       setDraft(data.session?.creationDraft);
@@ -335,10 +356,14 @@ export function BookCreate({ nav, theme, t }: { nav: Nav; theme: Theme; t: TFunc
       return;
     }
 
+    const requestToken = beginDraftSync();
     setCreating(true);
     setError(null);
     try {
       const data = await runAgentInstruction("/create");
+      if (!shouldApplyDraftSyncResult(draftSyncTokenRef.current, requestToken)) {
+        return;
+      }
       const bookId = data.session?.activeBookId;
       if (!bookId) {
         throw new Error(projectLang === "zh" ? "创建完成后没有返回书籍 ID。" : "Create succeeded but no book id was returned.");
@@ -355,10 +380,14 @@ export function BookCreate({ nav, theme, t }: { nav: Nav; theme: Theme; t: TFunc
   };
 
   const handleDiscard = async () => {
+    const requestToken = beginDraftSync();
     setSubmitting(true);
     setError(null);
     try {
       const data = await runAgentInstruction("/discard");
+      if (!shouldApplyDraftSyncResult(draftSyncTokenRef.current, requestToken)) {
+        return;
+      }
       setStatus(data.response ?? null);
       setDraft(undefined);
       setInput("");

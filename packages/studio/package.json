@@ -1,6 +1,6 @@
 {
   "name": "@jiejingtazhu/inkos-studio",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "description": "InkOS Studio — Web workbench for novel writing",
   "type": "module",
   "main": "dist/api/index.js",
