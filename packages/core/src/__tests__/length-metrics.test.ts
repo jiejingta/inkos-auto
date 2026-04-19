@@ -63,6 +63,18 @@ describe("length metrics", () => {
     expect(spec.hardMax).toBe(280);
   });
 
+  it("supports configurable range ratios", () => {
+    const spec = buildLengthSpec(3000, "zh", {
+      softRatio: 0.3,
+      hardRatio: 0.4,
+    });
+
+    expect(spec.softMin).toBe(2100);
+    expect(spec.softMax).toBe(3900);
+    expect(spec.hardMin).toBe(1800);
+    expect(spec.hardMax).toBe(4200);
+  });
+
   it("detects soft and hard range drift", () => {
     const spec = buildLengthSpec(2200, "zh");
 

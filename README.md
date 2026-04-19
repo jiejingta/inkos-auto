@@ -206,6 +206,24 @@ inkos compose chapter 吞天魔帝
 - 如果正文超出允许区间，InkOS 最多只会追加 1 次纠偏归一化（压缩或补足），不会直接硬截断正文
 - 如果 1 次纠偏后仍然超出 hard range，章节照常保存，但会在结果和 chapter index 里留下长度 warning / telemetry
 
+现在区间比例已经支持项目级配置，写在 `inkos.json` 顶层的 `lengthGovernance.range`：
+
+```json
+{
+  "lengthGovernance": {
+    "range": {
+      "softRatio": 0.3,
+      "hardRatio": 0.4
+    }
+  }
+}
+```
+
+- `softRatio`：soft range 的单边波动比例，超出它就会触发归一化
+- `hardRatio`：hard range 的单边波动比例，归一化后仍超出时会记 length warning
+- 两个值都用 `0-1` 小数表示，且 `hardRatio` 必须大于等于 `softRatio`
+- 默认值保持旧行为：`softRatio ≈ 0.136`、`hardRatio ≈ 0.273`
+
 ### 续写已有作品
 
 `inkos import chapters` 从已有小说文本导入章节，自动逆向工程 7 个真相文件（世界状态、角色矩阵、资源账本、伏笔钩子等），支持 `第X章` 和自定义分割模式、断点续导。导入后 `inkos write next` 无缝接续创作。

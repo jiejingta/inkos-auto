@@ -1,10 +1,13 @@
-import type { LengthCountingMode, LengthNormalizeMode, LengthSpec } from "../models/length-governance.js";
+import {
+  DEFAULT_HARD_RANGE_RATIO,
+  DEFAULT_SOFT_RANGE_RATIO,
+  type LengthCountingMode,
+  type LengthNormalizeMode,
+  type LengthRangeConfig,
+  type LengthSpec,
+} from "../models/length-governance.js";
 
 export type LengthLanguage = "zh" | "en";
-
-const REFERENCE_TARGET = 2200;
-const SOFT_RANGE_DELTA = 300;
-const HARD_RANGE_DELTA = 600;
 
 export function countChapterLength(
   content: string,
@@ -36,9 +39,12 @@ export function formatLengthCount(
 export function buildLengthSpec(
   target: number,
   language: LengthLanguage = "zh",
+  rangeConfig?: Partial<LengthRangeConfig>,
 ): LengthSpec {
-  const softDelta = scaleRangeDelta(target, SOFT_RANGE_DELTA);
-  const hardDelta = Math.max(softDelta, scaleRangeDelta(target, HARD_RANGE_DELTA));
+  const softRatio = rangeConfig?.softRatio ?? DEFAULT_SOFT_RANGE_RATIO;
+  const hardRatio = Math.max(softRatio, rangeConfig?.hardRatio ?? DEFAULT_HARD_RANGE_RATIO);
+  const softDelta = scaleRangeDelta(target, softRatio);
+  const hardDelta = Math.max(softDelta, scaleRangeDelta(target, hardRatio));
   const softMin = Math.max(1, target - softDelta);
   const softMax = target + softDelta;
   const hardMin = Math.max(1, target - hardDelta);
@@ -55,8 +61,8 @@ export function buildLengthSpec(
   };
 }
 
-function scaleRangeDelta(target: number, referenceDelta: number): number {
-  return Math.max(1, Math.floor((target * referenceDelta) / REFERENCE_TARGET));
+function scaleRangeDelta(target: number, ratio: number): number {
+  return Math.max(1, Math.floor(target * ratio + 1e-9));
 }
 
 export function isOutsideSoftRange(

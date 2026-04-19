@@ -350,6 +350,27 @@ describe("ProjectConfigSchema", () => {
     expect(result.inputGovernanceMode).toBe("v2");
   });
 
+  it("applies default length governance ratios", () => {
+    const result = ProjectConfigSchema.parse(validProject);
+    expect(result.lengthGovernance.range.softRatio).toBeCloseTo(300 / 2200);
+    expect(result.lengthGovernance.range.hardRatio).toBeCloseTo(600 / 2200);
+  });
+
+  it("accepts custom length governance ratios", () => {
+    const result = ProjectConfigSchema.parse({
+      ...validProject,
+      lengthGovernance: {
+        range: {
+          softRatio: 0.3,
+          hardRatio: 0.4,
+        },
+      },
+    });
+
+    expect(result.lengthGovernance.range.softRatio).toBe(0.3);
+    expect(result.lengthGovernance.range.hardRatio).toBe(0.4);
+  });
+
   it("rejects wrong version", () => {
     expect(() =>
       ProjectConfigSchema.parse({ ...validProject, version: "1.0.0" }),
@@ -365,6 +386,20 @@ describe("ProjectConfigSchema", () => {
   it("rejects missing LLM config", () => {
     expect(() =>
       ProjectConfigSchema.parse({ name: "p", version: "0.1.0" }),
+    ).toThrow();
+  });
+
+  it("rejects hard length governance ratios narrower than the soft ratio", () => {
+    expect(() =>
+      ProjectConfigSchema.parse({
+        ...validProject,
+        lengthGovernance: {
+          range: {
+            softRatio: 0.3,
+            hardRatio: 0.2,
+          },
+        },
+      }),
     ).toThrow();
   });
 });

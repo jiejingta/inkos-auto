@@ -1,10 +1,35 @@
 import { z } from "zod";
 
+export const DEFAULT_SOFT_RANGE_RATIO = 300 / 2200;
+export const DEFAULT_HARD_RANGE_RATIO = 600 / 2200;
+
 export const LengthCountingModeSchema = z.enum(["zh_chars", "en_words"]);
 export type LengthCountingMode = z.infer<typeof LengthCountingModeSchema>;
 
 export const LengthNormalizeModeSchema = z.enum(["expand", "compress", "none"]);
 export type LengthNormalizeMode = z.infer<typeof LengthNormalizeModeSchema>;
+
+export const LengthRangeConfigSchema = z.object({
+  softRatio: z.number().gt(0).lte(1).default(DEFAULT_SOFT_RANGE_RATIO),
+  hardRatio: z.number().gt(0).lte(1).default(DEFAULT_HARD_RANGE_RATIO),
+}).refine(
+  (value) => value.hardRatio >= value.softRatio,
+  {
+    message: "hardRatio must be greater than or equal to softRatio",
+    path: ["hardRatio"],
+  },
+);
+
+export type LengthRangeConfig = z.infer<typeof LengthRangeConfigSchema>;
+
+export const LengthGovernanceConfigSchema = z.object({
+  range: LengthRangeConfigSchema.default({
+    softRatio: DEFAULT_SOFT_RANGE_RATIO,
+    hardRatio: DEFAULT_HARD_RANGE_RATIO,
+  }),
+});
+
+export type LengthGovernanceConfig = z.infer<typeof LengthGovernanceConfigSchema>;
 
 export const LengthSpecSchema = z.object({
   target: z.number().int().min(1),

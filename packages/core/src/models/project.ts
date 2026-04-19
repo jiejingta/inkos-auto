@@ -1,4 +1,10 @@
 import { z } from "zod";
+import {
+  LengthGovernanceConfigSchema,
+  type LengthGovernanceConfig,
+  DEFAULT_SOFT_RANGE_RATIO,
+  DEFAULT_HARD_RANGE_RATIO,
+} from "./length-governance.js";
 
 export const LLMConfigSchema = z.object({
   provider: z.enum(["anthropic", "openai", "custom"]),
@@ -84,6 +90,12 @@ export const ProjectConfigSchema = z.object({
   detection: DetectionConfigSchema.optional(),
   modelOverrides: z.record(z.string(), ModelOverrideValueSchema).optional(),
   inputGovernanceMode: InputGovernanceModeSchema.default("v2"),
+  lengthGovernance: LengthGovernanceConfigSchema.default({
+    range: {
+      softRatio: DEFAULT_SOFT_RANGE_RATIO,
+      hardRatio: DEFAULT_HARD_RANGE_RATIO,
+    },
+  }),
   daemon: z.object({
     schedule: z.object({
       radarCron: z.string().default("0 */6 * * *"),
@@ -121,3 +133,4 @@ export const ProjectConfigSchema = z.object({
 });
 
 export type ProjectConfig = z.infer<typeof ProjectConfigSchema>;
+export type { LengthGovernanceConfig };

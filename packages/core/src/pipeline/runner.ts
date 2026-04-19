@@ -3,7 +3,7 @@ import { chatCompletion, createLLMClient } from "../llm/provider.js";
 import type { Logger } from "../utils/logger.js";
 import type { BookConfig, FanficMode } from "../models/book.js";
 import type { ChapterMeta } from "../models/chapter.js";
-import type { NotifyChannel, LLMConfig, AgentLLMOverride, InputGovernanceMode } from "../models/project.js";
+import type { NotifyChannel, LLMConfig, AgentLLMOverride, InputGovernanceMode, LengthGovernanceConfig } from "../models/project.js";
 import type { GenreProfile } from "../models/genre-profile.js";
 import { ArchitectAgent, type ArchitectOutput } from "../agents/architect.js";
 import { FoundationReviewerAgent } from "../agents/foundation-reviewer.js";
@@ -80,6 +80,7 @@ export interface PipelineConfig {
   readonly model: string;
   readonly projectRoot: string;
   readonly defaultLLMConfig?: LLMConfig;
+  readonly lengthGovernance?: LengthGovernanceConfig;
   readonly notifyChannels?: ReadonlyArray<NotifyChannel>;
   readonly radarSources?: ReadonlyArray<RadarSource>;
   readonly externalContext?: string;
@@ -235,6 +236,17 @@ export class PipelineRunner {
 
   private languageFromLengthSpec(lengthSpec: Pick<LengthSpec, "countingMode">): LengthLanguage {
     return lengthSpec.countingMode === "en_words" ? "en" : "zh";
+  }
+
+  private buildConfiguredLengthSpec(
+    target: number,
+    language: LengthLanguage,
+  ): LengthSpec {
+    return buildLengthSpec(
+      target,
+      language,
+      this.config.lengthGovernance?.range,
+    );
   }
 
   private logStage(language: LengthLanguage, message: { zh: string; en: string }): void {
@@ -624,7 +636,7 @@ export class PipelineRunner {
       );
 
       const { profile: gp } = await this.loadGenreProfile(book.genre);
-      const lengthSpec = buildLengthSpec(
+      const lengthSpec = this.buildConfiguredLengthSpec(
         wordCount ?? book.chapterWordCount,
         book.language ?? gp.language,
       );
@@ -922,7 +934,7 @@ export class PipelineRunner {
       const lengthLanguage = chapterMeta.lengthTelemetry?.countingMode === "en_words"
         ? "en"
         : language;
-      const lengthSpec = buildLengthSpec(
+      const lengthSpec = this.buildConfiguredLengthSpec(
         chapterLengthTarget,
         lengthLanguage,
       );
@@ -1501,7 +1513,7 @@ export class PipelineRunner {
       : undefined;
     const { profile: gp } = await this.loadGenreProfile(book.genre);
     const pipelineLang = book.language ?? gp.language;
-    const lengthSpec = buildLengthSpec(
+    const lengthSpec = this.buildConfiguredLengthSpec(
       wordCount ?? book.chapterWordCount,
       pipelineLang,
     );

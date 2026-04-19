@@ -166,6 +166,8 @@ override 的持久化位置：
   - `inkos up` 的自动推进规则在这里。
 - `packages/core/src/pipeline/runner.ts`
   - 单章完整流水线、手动 `auditDraft` / `reviseDraft` / `writeNextChapter` 的主入口；同时负责 `current_focus.md` 自动滚动，以及 `particle_ledger.md` 的失管检测/低调用量回填。
+- `packages/core/src/utils/length-metrics.ts`
+  - 章节长度区间的计算入口。现在会优先读取项目配置里的 `lengthGovernance.range.softRatio / hardRatio`，默认值仍保持旧版区间。
 - `packages/core/src/pipeline/chapter-persistence.ts`
   - chapter index 写入格式，以及 `ready-for-review` / `audit-failed` / `state-degraded` 三种落盘分流。
 - `packages/core/src/agents/title-refiner.ts`
@@ -226,6 +228,23 @@ npx pnpm --filter @jiejingtazhu/inkos-core test
 
 - 这台 Windows 机器的 PowerShell 当前没有把 `pnpm` 直接放进 PATH；需要时可用 `npx pnpm ...` 代替。
 - `packages/studio` 打包时仍会打印 Vite 的大 chunk warning，但这是构建提示，不会阻断 `release:pack` 或 npm 发包。
+
+补充：如果要放宽字数区间，不用再改代码常量，直接在 `inkos.json` 顶层加：
+
+```json
+{
+  "lengthGovernance": {
+    "range": {
+      "softRatio": 0.3,
+      "hardRatio": 0.4
+    }
+  }
+}
+```
+
+- `softRatio` 决定触发归一化的区间
+- `hardRatio` 决定“归一化后仍算超标”的警告区间
+- 默认值保持旧版行为：`softRatio ≈ 0.136`、`hardRatio ≈ 0.273`
 
 补充：当前仓库已经有一条更适合发布前自检的本地链路：
 
