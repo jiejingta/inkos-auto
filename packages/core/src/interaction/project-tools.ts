@@ -13,7 +13,7 @@ import type {
 import { chatCompletion } from "../index.js";
 import { executeEditTransaction } from "./edit-controller.js";
 import type { InteractionRuntimeTools } from "./runtime.js";
-import type { BookCreationDraft } from "./session.js";
+import { normalizeCreationDraft, type BookCreationDraft } from "./session.js";
 import { applyPromptOverridePair } from "../prompts/overrides.js";
 
 type PipelineLike = Pick<PipelineRunner, "writeNextChapter" | "reviseDraft"> & {
@@ -99,7 +99,13 @@ function extractBalancedJsonObject(text: string): string | null {
   return null;
 }
 
-function parseCreationDraftResult(text: string): {
+function parseCreationDraftResult(
+  text: string,
+  options?: {
+    readonly existingDraft?: BookCreationDraft;
+    readonly fallbackConcept?: string;
+  },
+): {
   readonly assistantReply: string;
   readonly draft: BookCreationDraft;
 } | null {
@@ -111,14 +117,19 @@ function parseCreationDraftResult(text: string): {
   try {
     const parsed = JSON.parse(candidate) as {
       assistantReply?: string;
-      draft?: BookCreationDraft;
+      draft?: unknown;
     };
-    if (!parsed.assistantReply || !parsed.draft) {
+    if (!parsed.draft) {
       return null;
     }
     return {
-      assistantReply: parsed.assistantReply,
-      draft: parsed.draft,
+      assistantReply: typeof parsed.assistantReply === "string" && parsed.assistantReply.trim().length > 0
+        ? parsed.assistantReply.trim()
+        : "已更新创作草案。",
+      draft: normalizeCreationDraft(parsed.draft, {
+        ...options?.existingDraft,
+        concept: options?.existingDraft?.concept ?? options?.fallbackConcept,
+      }),
     };
   } catch {
     return null;
@@ -520,7 +531,10 @@ export function createInteractionToolsFromDeps(
         { temperature: 0.4 },
       );
 
-      const parsed = parseCreationDraftResult(response.content);
+      const parsed = parseCreationDraftResult(response.content, {
+        existingDraft,
+        fallbackConcept: existingDraft?.concept ?? input,
+      });
       if (!parsed) {
         throw new Error("Book draft assistant returned invalid JSON.");
       }

@@ -182,6 +182,13 @@ export function buildCreationDraftSummary(
   return rows.filter((row): row is DraftSummaryRow => Boolean(row));
 }
 
+export function resolveDraftMissingFields(draft?: Partial<BookCreationDraft>): ReadonlyArray<string> {
+  if (!Array.isArray(draft?.missingFields)) {
+    return [];
+  }
+  return draft.missingFields.filter((field): field is string => typeof field === "string" && field.trim().length > 0);
+}
+
 export function issueDraftSyncToken(currentToken: number): number {
   return currentToken + 1;
 }
@@ -270,6 +277,7 @@ export function BookCreate({ nav, theme, t }: { nav: Nav; theme: Theme; t: TFunc
     () => (draft ? buildCreationDraftSummary(draft, projectLang) : []),
     [draft, projectLang],
   );
+  const missingFields = useMemo(() => resolveDraftMissingFields(draft), [draft]);
 
   const beginDraftSync = (): number => {
     draftSyncTokenRef.current = issueDraftSyncToken(draftSyncTokenRef.current);
@@ -451,11 +459,11 @@ export function BookCreate({ nav, theme, t }: { nav: Nav; theme: Theme; t: TFunc
                   </div>
                 ) : null}
 
-                {draft.missingFields.length > 0 ? (
+                {missingFields.length > 0 ? (
                   <div className="space-y-2">
                     <div className="text-xs font-medium text-foreground">{copy.missingHeading}</div>
                     <div className="flex flex-wrap gap-2">
-                      {draft.missingFields.map((field) => (
+                      {missingFields.map((field) => (
                         <span
                           key={field}
                           className="rounded-full border border-border/70 bg-secondary/50 px-3 py-1 text-xs text-muted-foreground"

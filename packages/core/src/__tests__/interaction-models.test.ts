@@ -10,6 +10,7 @@ import {
   isTerminalExecutionStatus,
   appendInteractionMessage,
   appendInteractionEvent,
+  normalizeCreationDraft,
   updateCreationDraft,
   clearCreationDraft,
 } from "../index.js";
@@ -151,5 +152,46 @@ describe("interaction models", () => {
     const withDraft = updateCreationDraft(session, draft);
     expect(withDraft.creationDraft?.title).toBe("夜港账本");
     expect(clearCreationDraft(withDraft).creationDraft).toBeUndefined();
+  });
+
+  it("normalizes partial creation drafts with defaults and numeric coercion", () => {
+    expect(normalizeCreationDraft({
+      concept: " 港风商战悬疑 ",
+      targetChapters: "120",
+      chapterWordCount: "2800",
+    })).toEqual({
+      concept: "港风商战悬疑",
+      targetChapters: 120,
+      chapterWordCount: 2800,
+      missingFields: [],
+      readyToCreate: false,
+    });
+  });
+
+  it("reuses the previous concept when an updated draft only returns changed fields", () => {
+    const session = InteractionSessionSchema.parse({
+      sessionId: "session-6",
+      projectRoot: "/tmp/project",
+      automationMode: "semi",
+      creationDraft: {
+        concept: "港风商战悬疑，主角从灰产洗白。",
+        title: "夜港账本",
+        missingFields: ["genre"],
+        readyToCreate: false,
+      },
+      messages: [],
+      events: [],
+    });
+
+    const next = updateCreationDraft(session, {
+      title: "夜港总账",
+    } as never);
+
+    expect(next.creationDraft).toEqual(expect.objectContaining({
+      concept: "港风商战悬疑，主角从灰产洗白。",
+      title: "夜港总账",
+      missingFields: ["genre"],
+      readyToCreate: false,
+    }));
   });
 });

@@ -32,8 +32,9 @@ export async function persistProjectSession(
   session: InteractionSession,
 ): Promise<void> {
   const dir = join(projectRoot, SESSION_DIR);
+  const normalizedSession = InteractionSessionSchema.parse(session);
   await mkdir(dir, { recursive: true });
-  await writeFile(resolveProjectSessionPath(projectRoot), JSON.stringify(session, null, 2), "utf-8");
+  await writeFile(resolveProjectSessionPath(projectRoot), JSON.stringify(normalizedSession, null, 2), "utf-8");
 }
 
 export async function resolveSessionActiveBook(

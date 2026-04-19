@@ -110,4 +110,44 @@ describe("developBookDraft – maxTokens not capped", () => {
     const options = mockChatCompletion.mock.calls[0]?.[3] as Record<string, unknown> | undefined;
     expect(options).not.toHaveProperty("maxTokens");
   });
+
+  it("normalizes incomplete draft payloads before returning them to the UI", async () => {
+    mockChatCompletion.mockResolvedValueOnce({
+      content: JSON.stringify({
+        assistantReply: "先把卷一方向收住。",
+        draft: {
+          title: "夜港账本",
+          targetChapters: "120",
+          chapterWordCount: "2800",
+        },
+      }),
+      tokensUsed: { prompt: 5, completion: 80, total: 85 },
+    });
+
+    const tools = createInteractionToolsFromDeps(
+      fakePipeline as never,
+      fakeState as never,
+    );
+
+    const result = await tools.developBookDraft?.("我想写都市异能", {
+      concept: "都市异能",
+      missingFields: ["genre"],
+      readyToCreate: false,
+    });
+
+    expect((result as {
+      __interaction?: {
+        details?: {
+          creationDraft?: Record<string, unknown>;
+        };
+      };
+    }).__interaction?.details?.creationDraft).toEqual({
+      concept: "都市异能",
+      title: "夜港账本",
+      targetChapters: 120,
+      chapterWordCount: 2800,
+      missingFields: ["genre"],
+      readyToCreate: false,
+    });
+  });
 });

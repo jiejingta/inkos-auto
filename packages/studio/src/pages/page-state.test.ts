@@ -6,6 +6,7 @@ import {
   issueDraftSyncToken,
   platformOptionsForLanguage,
   pickValidValue,
+  resolveDraftMissingFields,
   resolveDraftInstruction,
   shouldApplyDraftSyncResult,
   waitForBookReady,
@@ -115,6 +116,14 @@ describe("draft sync tokens", () => {
   it("rejects stale draft responses once a newer request has started", () => {
     expect(shouldApplyDraftSyncResult(2, 1)).toBe(false);
     expect(shouldApplyDraftSyncResult(2, 2)).toBe(true);
+  });
+});
+
+describe("resolveDraftMissingFields", () => {
+  it("falls back to an empty list when the draft payload omits missingFields", () => {
+    expect(resolveDraftMissingFields({
+      title: "夜港账本",
+    })).toEqual([]);
   });
 });
 

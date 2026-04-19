@@ -102,6 +102,7 @@ export {
   clearPendingDecision,
   updateAutomationMode,
   updateCreationDraft,
+  normalizeCreationDraft,
   appendInteractionMessage,
   appendInteractionEvent,
 } from "./interaction/session.js";
