@@ -7,7 +7,7 @@ import { PipelineRunner } from "../pipeline/runner.js";
 import * as llmProvider from "../llm/provider.js";
 import { StateManager } from "../state/manager.js";
 import { ArchitectAgent } from "../agents/architect.js";
-import { PlannerAgent } from "../agents/planner.js";
+import { PlannerAgent, type PlanChapterOutput } from "../agents/planner.js";
 import { ComposerAgent } from "../agents/composer.js";
 import { WriterAgent, type WriteChapterOutput } from "../agents/writer.js";
 import { LengthNormalizerAgent } from "../agents/length-normalizer.js";
@@ -16,11 +16,13 @@ import { ReviserAgent, type ReviseOutput } from "../agents/reviser.js";
 import { ChapterAnalyzerAgent } from "../agents/chapter-analyzer.js";
 import { StateValidatorAgent } from "../agents/state-validator.js";
 import { FoundationReviewerAgent } from "../agents/foundation-reviewer.js";
+import { TitleRefinerAgent } from "../agents/title-refiner.js";
 import type { BookConfig } from "../models/book.js";
 import type { ChapterMeta } from "../models/chapter.js";
 import { MemoryDB } from "../state/memory-db.js";
 import * as memoryDbModule from "../state/memory-db.js";
 import { countChapterLength } from "../utils/length-metrics.js";
+import { validateChapterTitle } from "../agents/post-write-validator.js";
 
 const require = createRequire(import.meta.url);
 const hasNodeSqlite = (() => {
@@ -130,6 +132,31 @@ function createStateCard(params: {
   ].join("\n");
 }
 
+function createPlanChapterOutput(overrides: Partial<PlanChapterOutput> = {}): PlanChapterOutput {
+  return {
+    intent: {
+      chapter: 2,
+      goal: "Track the next debt clue.",
+      outlineNode: "The guild ledger points toward the next trap.",
+      mustKeep: [],
+      mustAvoid: [],
+      styleEmphasis: [],
+      conflicts: [],
+      hookAgenda: {
+        pressureMap: [],
+        mustAdvance: [],
+        eligibleResolve: [],
+        staleDebt: [],
+        avoidNewHookFamilies: [],
+      },
+    },
+    intentMarkdown: "# Chapter Intent\n\nKeep pressure on the debt clue.\n",
+    plannerInputs: [],
+    runtimePath: "runtime/chapter-0002.intent.md",
+    ...overrides,
+  };
+}
+
 function createCaptureLogger() {
   const infos: string[] = [];
   const warnings: string[] = [];
@@ -206,6 +233,33 @@ describe("PipelineRunner", () => {
       dimensions: [],
       overallFeedback: "auto-pass for test",
     });
+    vi.spyOn(TitleRefinerAgent.prototype, "refineChapterTitle").mockImplementation(
+      async ({ currentTitle, existingTitles, chapterNumber, chapterContent }) => {
+        const isEnglish = /[A-Za-z]{2,}/.test(currentTitle) || /[A-Za-z]{2,}/.test(chapterContent);
+        const language = isEnglish ? "en" : "zh";
+        let title = currentTitle.trim();
+        if (!title) {
+          title = language === "en"
+            ? `Turning Point and Aftermath ${chapterNumber}`
+            : `转折与余波${chapterNumber}`;
+        }
+        if (validateChapterTitle(title, existingTitles, language).length > 0) {
+          title = language === "en"
+            ? `Turning Point and Aftermath ${chapterNumber}`
+            : `第${chapterNumber}章的转折与余波`;
+        }
+        if (validateChapterTitle(title, existingTitles, language).length > 0) {
+          title = language === "en"
+            ? `Recovered Signal and Aftermath ${chapterNumber}`
+            : `转折与余波${chapterNumber}`;
+        }
+        return {
+          title,
+          summary: "kept",
+          tokenUsage: ZERO_USAGE,
+        };
+      },
+    );
     vi.spyOn(LengthNormalizerAgent.prototype, "normalizeChapter").mockImplementation(
       async ({ chapterContent, lengthSpec }) => ({
         normalizedContent: chapterContent,
@@ -1191,7 +1245,11 @@ describe("PipelineRunner", () => {
     try {
       await runner.writeNextChapter(bookId, 220);
 
-      expect(planChapter).toHaveBeenCalledTimes(1);
+      expect(planChapter).toHaveBeenCalledTimes(2);
+      expect(planChapter.mock.calls[1]?.[0]).toMatchObject({
+        chapterNumber: 2,
+        ignoreCurrentFocus: true,
+      });
       expect(composeChapter).toHaveBeenCalledTimes(1);
       const writeInput = writeChapter.mock.calls[0]?.[0];
       expect(writeInput?.chapterIntent).toContain("# Chapter Intent");
@@ -1274,7 +1332,11 @@ describe("PipelineRunner", () => {
     try {
       await runner.writeNextChapter(bookId, 220);
 
-      expect(planChapter).toHaveBeenCalledTimes(1);
+      expect(planChapter).toHaveBeenCalledTimes(2);
+      expect(planChapter.mock.calls[1]?.[0]).toMatchObject({
+        chapterNumber: 2,
+        ignoreCurrentFocus: true,
+      });
       const writeInput = writeChapter.mock.calls[0]?.[0];
       expect(writeInput?.chapterIntent).toContain("Track the merchant guild trail.");
       expect(writeInput?.chapterIntent).not.toContain("\n**\n");
@@ -2386,6 +2448,207 @@ describe("PipelineRunner", () => {
     await rm(root, { recursive: true, force: true });
   });
 
+  it("reuses the current settlement ledger to heal an unmanaged particle ledger without extra analyzer calls", async () => {
+    const { root, runner, state, bookId } = await createRunnerFixture({
+      inputGovernanceMode: "legacy",
+    });
+    const storyDir = join(state.bookDir(bookId), "story");
+    const chaptersDir = join(state.bookDir(bookId), "chapters");
+    const chapterBody = "Healthy chapter body with the copper token in his coat.";
+    const now = "2026-03-19T00:00:00.000Z";
+
+    await Promise.all([
+      writeFile(join(storyDir, "current_focus.md"), "# 当前关注点\n\n第5章必须彻底重写。\n", "utf-8"),
+      writeFile(join(storyDir, "current_state.md"), "stable state", "utf-8"),
+      writeFile(join(storyDir, "pending_hooks.md"), "stable hooks", "utf-8"),
+      writeFile(join(storyDir, "particle_ledger.md"), "# 粒子账本\n\n账本更新记录：初始化\n", "utf-8"),
+      writeFile(join(chaptersDir, "0001_旧章一.md"), "# 第1章 旧章一\n\n旧章节。", "utf-8"),
+      writeFile(join(chaptersDir, "0002_旧章二.md"), "# 第2章 旧章二\n\n旧章节。", "utf-8"),
+      state.saveChapterIndex(bookId, [
+        {
+          number: 1,
+          title: "旧章一",
+          status: "approved",
+          wordCount: 4,
+          createdAt: now,
+          updatedAt: now,
+          auditIssues: [],
+          lengthWarnings: [],
+        },
+        {
+          number: 2,
+          title: "旧章二",
+          status: "approved",
+          wordCount: 4,
+          createdAt: now,
+          updatedAt: now,
+          auditIssues: [],
+          lengthWarnings: [],
+        },
+      ]),
+    ]);
+
+    vi.spyOn(PlannerAgent.prototype, "planChapter").mockResolvedValue(
+      createPlanChapterOutput({
+        intent: {
+          chapter: 4,
+          goal: "推进下一条债务线索。",
+          outlineNode: "沿着账本残页把调查推向下一处陷阱。",
+          mustKeep: [],
+          mustAvoid: [],
+          styleEmphasis: [],
+          conflicts: [],
+          hookAgenda: {
+            pressureMap: [],
+            mustAdvance: ["债务残页"],
+            eligibleResolve: [],
+            staleDebt: [],
+            avoidNewHookFamilies: [],
+          },
+        },
+      }),
+    );
+    vi.spyOn(TitleRefinerAgent.prototype, "refineChapterTitle").mockResolvedValue({
+      title: "Test Chapter",
+      summary: "kept",
+      tokenUsage: ZERO_USAGE,
+    });
+    vi.spyOn(WriterAgent.prototype, "writeChapter").mockResolvedValue(
+      createWriterOutput({
+        chapterNumber: 3,
+        content: chapterBody,
+        wordCount: chapterBody.length,
+        updatedState: "fixed state",
+        updatedHooks: "fixed hooks",
+        updatedLedger: "recovered ledger",
+      }),
+    );
+    vi.spyOn(ContinuityAuditor.prototype, "auditChapter").mockResolvedValue(
+      createAuditResult({
+        passed: true,
+        issues: [],
+        summary: "clean",
+      }),
+    );
+    const analyzer = vi.spyOn(ChapterAnalyzerAgent.prototype, "analyzeChapter").mockResolvedValue(
+      createAnalyzedOutput({
+        content: chapterBody,
+        wordCount: chapterBody.length,
+        updatedLedger: "analyzed ledger",
+      }),
+    );
+
+    const result = await runner.writeNextChapter(bookId);
+
+    expect(result.status).toBe("ready-for-review");
+    expect(analyzer).not.toHaveBeenCalled();
+    await expect(readFile(join(storyDir, "particle_ledger.md"), "utf-8")).resolves.toBe("recovered ledger");
+    await expect(readFile(join(storyDir, "current_focus.md"), "utf-8")).resolves.toContain("第4章应优先推进");
+
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("falls back to chapter-analyzer once when the ledger remains unmanaged after settlement", async () => {
+    const { root, runner, state, bookId } = await createRunnerFixture({
+      inputGovernanceMode: "legacy",
+    });
+    const storyDir = join(state.bookDir(bookId), "story");
+    const chaptersDir = join(state.bookDir(bookId), "chapters");
+    const chapterBody = "Healthy chapter body with the copper token in his coat.";
+    const now = "2026-03-19T00:00:00.000Z";
+
+    await Promise.all([
+      writeFile(join(storyDir, "current_focus.md"), "# 当前关注点\n\n第5章必须彻底重写。\n", "utf-8"),
+      writeFile(join(storyDir, "current_state.md"), "stable state", "utf-8"),
+      writeFile(join(storyDir, "pending_hooks.md"), "stable hooks", "utf-8"),
+      writeFile(join(storyDir, "particle_ledger.md"), "# 粒子账本\n\n账本更新记录：初始化\n", "utf-8"),
+      writeFile(join(chaptersDir, "0001_旧章一.md"), "# 第1章 旧章一\n\n旧章节。", "utf-8"),
+      writeFile(join(chaptersDir, "0002_旧章二.md"), "# 第2章 旧章二\n\n旧章节。", "utf-8"),
+      state.saveChapterIndex(bookId, [
+        {
+          number: 1,
+          title: "旧章一",
+          status: "approved",
+          wordCount: 4,
+          createdAt: now,
+          updatedAt: now,
+          auditIssues: [],
+          lengthWarnings: [],
+        },
+        {
+          number: 2,
+          title: "旧章二",
+          status: "approved",
+          wordCount: 4,
+          createdAt: now,
+          updatedAt: now,
+          auditIssues: [],
+          lengthWarnings: [],
+        },
+      ]),
+    ]);
+
+    vi.spyOn(PlannerAgent.prototype, "planChapter").mockResolvedValue(
+      createPlanChapterOutput({
+        intent: {
+          chapter: 4,
+          goal: "推进下一条债务线索。",
+          outlineNode: "沿着账本残页把调查推向下一处陷阱。",
+          mustKeep: [],
+          mustAvoid: [],
+          styleEmphasis: [],
+          conflicts: [],
+          hookAgenda: {
+            pressureMap: [],
+            mustAdvance: ["债务残页"],
+            eligibleResolve: [],
+            staleDebt: [],
+            avoidNewHookFamilies: [],
+          },
+        },
+      }),
+    );
+    vi.spyOn(TitleRefinerAgent.prototype, "refineChapterTitle").mockResolvedValue({
+      title: "Test Chapter",
+      summary: "kept",
+      tokenUsage: ZERO_USAGE,
+    });
+    vi.spyOn(WriterAgent.prototype, "writeChapter").mockResolvedValue(
+      createWriterOutput({
+        chapterNumber: 3,
+        content: chapterBody,
+        wordCount: chapterBody.length,
+        updatedState: "fixed state",
+        updatedHooks: "fixed hooks",
+        updatedLedger: "(账本未更新)",
+      }),
+    );
+    vi.spyOn(ContinuityAuditor.prototype, "auditChapter").mockResolvedValue(
+      createAuditResult({
+        passed: true,
+        issues: [],
+        summary: "clean",
+      }),
+    );
+    const analyzer = vi.spyOn(ChapterAnalyzerAgent.prototype, "analyzeChapter").mockResolvedValue(
+      createAnalyzedOutput({
+        content: chapterBody,
+        wordCount: chapterBody.length,
+        updatedState: "fixed state",
+        updatedHooks: "fixed hooks",
+        updatedLedger: "analyzed ledger",
+      }),
+    );
+
+    const result = await runner.writeNextChapter(bookId);
+
+    expect(result.status).toBe("ready-for-review");
+    expect(analyzer).toHaveBeenCalledTimes(1);
+    await expect(readFile(join(storyDir, "particle_ledger.md"), "utf-8")).resolves.toBe("analyzed ledger");
+
+    await rm(root, { recursive: true, force: true });
+  });
+
   it("persists a state-degraded chapter without advancing truth files when settlement retry still contradicts the body", async () => {
     const { root, runner, state, bookId } = await createRunnerFixture({
       inputGovernanceMode: "legacy",
@@ -2527,6 +2790,7 @@ describe("PipelineRunner", () => {
     const stageStoryDir = join(stageBookDir, "story");
 
     await Promise.all([
+      writeFile(join(storyDir, "current_focus.md"), "# 当前关注点\n\n第5章必须彻底重写。\n", "utf-8"),
       writeFile(join(storyDir, "current_state.md"), createStateCard({
         chapter: 0,
         location: "Dock Nine",
@@ -2567,14 +2831,40 @@ describe("PipelineRunner", () => {
         "",
       ].join("\n"), "utf-8"),
     ]);
+    const planChapter = vi.spyOn(PlannerAgent.prototype, "planChapter").mockResolvedValue(
+      createPlanChapterOutput({
+        intent: {
+          chapter: 2,
+          goal: "推进卡尔文留下的下一条债务线索。",
+          outlineNode: "沿着账本残页把调查推向下一处陷阱。",
+          mustKeep: [],
+          mustAvoid: ["不要重新引用第5章的旧改稿任务。"],
+          styleEmphasis: [],
+          conflicts: [],
+          hookAgenda: {
+            pressureMap: [],
+            mustAdvance: ["债务残页"],
+            eligibleResolve: [],
+            staleDebt: [],
+            avoidNewHookFamilies: [],
+          },
+        },
+      }),
+    );
 
     const result = await runner.approveChapter(bookId, 1);
     const savedIndex = await state.loadChapterIndex(bookId);
 
     expect(result.promotedReviewStage).toBe(true);
+    expect(planChapter).toHaveBeenCalledWith(expect.objectContaining({
+      chapterNumber: 2,
+      ignoreCurrentFocus: true,
+    }));
     expect(savedIndex[0]?.status).toBe("approved");
     await expect(readFile(join(storyDir, "current_state.md"), "utf-8")).resolves.toContain("| Current Chapter | 1 |");
     await expect(readFile(join(storyDir, "pending_hooks.md"), "utf-8")).resolves.toContain("berth-signal");
+    await expect(readFile(join(storyDir, "current_focus.md"), "utf-8")).resolves.toContain("第2章应优先推进");
+    await expect(readFile(join(storyDir, "current_focus.md"), "utf-8")).resolves.not.toContain("第5章必须彻底重写");
     await expect(stat(join(storyDir, "snapshots", "1", "current_state.md"))).resolves.toBeTruthy();
     await expect(stat(state.reviewStageRoot(bookId))).rejects.toThrow();
 
@@ -2756,6 +3046,11 @@ describe("PipelineRunner", () => {
         tokenUsage: ZERO_USAGE,
       }),
     );
+    vi.spyOn(TitleRefinerAgent.prototype, "refineChapterTitle").mockResolvedValue({
+      title: "Test Chapter",
+      summary: "kept",
+      tokenUsage: ZERO_USAGE,
+    });
 
     const { root, runner, state, bookId } = await createRunnerFixture({
       inputGovernanceMode: "legacy",
@@ -3775,9 +4070,9 @@ describe("PipelineRunner", () => {
           location: "Ashen ferry crossing",
           protagonistState: "Lin Yue still hides the oath token.",
           goal: "Find the vanished mentor.",
-          conflict: "The debt trail keeps narrowing.",
-        }),
-        updatedLedger: "",
+        conflict: "The debt trail keeps narrowing.",
+      }),
+        updatedLedger: "writer ledger",
         updatedHooks: "# Pending Hooks\n",
         chapterSummary: "| 3 | 回声 | 林越 | 继续潜伏 | 目标未变 | 债印未解 | 克制 | 布局 |",
       }),
@@ -3830,9 +4125,9 @@ describe("PipelineRunner", () => {
           location: "Ashen ferry crossing",
           protagonistState: "Lin Yue still hides the oath token.",
           goal: "Find the vanished mentor.",
-          conflict: "The debt trail keeps narrowing.",
-        }),
-        updatedLedger: "",
+        conflict: "The debt trail keeps narrowing.",
+      }),
+        updatedLedger: "writer ledger",
         updatedHooks: "# Pending Hooks\n",
         chapterSummary: "| 3 | 回声 | 林越 | 继续潜伏 | 目标未变 | 债印未解 | 克制 | 布局 |",
         hookHealthIssues: [{
@@ -4003,13 +4298,18 @@ describe("PipelineRunner", () => {
         summary: "clean",
       }),
     );
+    vi.spyOn(TitleRefinerAgent.prototype, "refineChapterTitle").mockResolvedValue({
+      title: "塔楼缺口里的回声",
+      summary: "replace duplicate with a full retitle",
+      tokenUsage: ZERO_USAGE,
+    });
 
     try {
       const result = await runner.writeNextChapter(bookId, 120);
       const index = await state.loadChapterIndex(bookId);
 
-      expect(result.title).toBe("回声（2）");
-      expect(index.at(-1)?.title).toBe("回声（2）");
+      expect(result.title).toBe("塔楼缺口里的回声");
+      expect(index.at(-1)?.title).toBe("塔楼缺口里的回声");
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -4058,6 +4358,11 @@ describe("PipelineRunner", () => {
         summary: "clean",
       }),
     );
+    vi.spyOn(TitleRefinerAgent.prototype, "refineChapterTitle").mockResolvedValue({
+      title: "塔楼缺口里的回声",
+      summary: "replace duplicate with a full retitle",
+      tokenUsage: ZERO_USAGE,
+    });
 
     try {
       const result = await runner.writeNextChapter(bookId, 120);

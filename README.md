@@ -120,6 +120,8 @@ inkos config show-models        # 查看当前路由
 
 如果你跑的是无人值守 `inkos up`，推荐把 `auditor` 和 `reviser` 拆开配置：`auditor` 用更稳定、更严格的审计模型，`reviser` 用更强的长文改写模型。运行时这两个键名就是 `auditor` / `reviser`。
 
+如果你对章节标题特别敏感，还可以单独给 `title-refiner` 配模型。它专门负责在正文写完后复审章节标题，读取 `book_rules` + 全量历史标题，避免“旧标题后面机械补尾”的低质量命名。
+
 **方式四：提示词工作台（Studio）**
 
 运行 `inkos studio` 后，可在侧边栏进入“提示词”页，集中查看 InkOS 当前真正会发给模型的 prompt 入口，包括 writer、auditor、architect、interaction、agent loop 等。
@@ -234,6 +236,10 @@ inkos compose chapter 吞天魔帝
 
 每章自动创建状态快照，`inkos write rewrite` 可回滚任意章节。写手动笔前输出自检表（上下文、资源、伏笔、风险），写完输出结算表，审计员交叉验证。文件锁防止并发写入。写后验证器含跨章重复检测和 11 条硬规则自动 spot-fix。
 
+标题现在也有专门治理链路：Writer 先起标题，随后 `title-refiner` 会结合 `book_rules` 和全量历史标题做二次复审；若标题重复、低信息、像占位符或只是对旧标题机械补尾，会要求整体重起，不再走本地拼接式自动改名。历史章节可通过 `inkos write retitle <book-id> --all` 批量重命名，并同步 `chapters/index.json`、章节文件首行、`chapter_summaries.*` 与快照中的标题。
+
+`current_focus.md` 也不再是“一次性初始化后长期不动”的文件。只要最新章节正式向前推进，系统就会为“下一章”重新规划 focus 并覆盖它；刷新时会显式忽略旧 focus，避免早期的人工指令或过期 rework 目标持续污染后续 planner。
+
 伏笔系统使用 Zod schema 校验——`lastAdvancedChapter` 必须是整数，`status` 只能是 open/progressing/deferred/resolved。LLM 输出的 JSON delta 在写入前经过 `applyRuntimeStateDelta` 做 immutable 更新 + `validateRuntimeState` 结构校验。坏数据直接拒绝，不会滚雪球。
 
 用户设置的 `INKOS_LLM_MAX_TOKENS` 作为全局上限生效，`llm.extra` 中的保留键（max_tokens、temperature 等）被自动过滤，防止意外覆盖。
@@ -286,6 +292,8 @@ inkos compose chapter 吞天魔帝
 - `ready-for-review`：正式 `story/*.md`、`story/state/*.json`、snapshot 会一起推进。
 - `audit-failed`：候选 truth 只进入 review staging，不会覆盖正式 `story/*.md`。
 - `review approve` 某个 `audit-failed` 章节时，会把 staged truth promote 到正式目录，然后再更新 snapshot / 记忆索引。
+
+另外，`particle_ledger.md` 现在会做“失管检测”。如果账本长期停留在初始化/占位状态，而当前题材又启用了数值体系，流水线会优先复用本次 settle 或 final analyzer 已经产出的账本结果修复它；只有仍拿不到有效账本时，才额外回退到一次 analyzer 重建，尽量减少 API 调用。
 
 Node 22+ 环境下自动启用 SQLite 时序记忆数据库（`story/memory.db`），支持按相关性检索历史事实、伏笔和章节摘要，避免全量注入导致的上下文膨胀。
 

@@ -143,6 +143,7 @@ describe("PipelineRunner structured-state memory sync", () => {
     const { WriterAgent } = await import("../agents/writer.js");
     const { ContinuityAuditor } = await import("../agents/continuity.js");
     const { StateValidatorAgent } = await import("../agents/state-validator.js");
+    const { TitleRefinerAgent } = await import("../agents/title-refiner.js");
 
     root = await mkdtemp(join(tmpdir(), "inkos-runner-memory-sync-"));
     const state = new StateManager(root);
@@ -258,6 +259,11 @@ describe("PipelineRunner structured-state memory sync", () => {
       summary: "clean",
       tokenUsage: ZERO_USAGE,
     });
+    vi.spyOn(TitleRefinerAgent.prototype, "refineChapterTitle").mockResolvedValue({
+      title: "Structured Chapter",
+      summary: "kept",
+      tokenUsage: ZERO_USAGE,
+    });
     vi.spyOn(StateValidatorAgent.prototype, "validate").mockResolvedValue({
       warnings: [],
       passed: true,
@@ -297,8 +303,10 @@ describe("PipelineRunner structured-state memory sync", () => {
     await runner.writeNextChapter(bookId);
 
     const narrativeStore = FakeMemoryDB.stores.get(bookDir);
-    expect(await readFile(join(storyDir, "pending_hooks.md"), "utf-8")).toContain("markdown-drift-hook");
-    expect(await readFile(join(storyDir, "chapter_summaries.md"), "utf-8")).toContain("Markdown Drift Summary");
+    expect(await readFile(join(storyDir, "pending_hooks.md"), "utf-8")).toContain("structured-hook");
+    expect(await readFile(join(storyDir, "pending_hooks.md"), "utf-8")).not.toContain("markdown-drift-hook");
+    expect(await readFile(join(storyDir, "chapter_summaries.md"), "utf-8")).toContain("Structured Summary");
+    expect(await readFile(join(storyDir, "chapter_summaries.md"), "utf-8")).not.toContain("Markdown Drift Summary");
     expect(narrativeStore?.hooks).toEqual([
       expect.objectContaining({
         hookId: "structured-hook",

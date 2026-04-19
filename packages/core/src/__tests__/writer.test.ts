@@ -1030,7 +1030,7 @@ describe("WriterAgent", () => {
           chapter: 4,
           selectedContext: [
             {
-              source: "story/chapter_summaries.md#recent_titles",
+              source: "story/chapter_summaries.md#historical_titles",
               reason: "Avoid repeated ledger titles.",
               excerpt: "1: Ledger in Rain | 2: Ledger at Dusk | 3: Harbor Ledger",
             },
@@ -1065,7 +1065,7 @@ describe("WriterAgent", () => {
       });
 
       const creativePrompt = (chatSpy.mock.calls[0]?.[0] as ReadonlyArray<{ content: string }> | undefined)?.[1]?.content ?? "";
-      expect(creativePrompt).toContain("## Recent Title History");
+      expect(creativePrompt).toContain("## Historical Title History");
       expect(creativePrompt).toContain("Ledger in Rain");
       expect(creativePrompt).toContain("## Recent Mood / Chapter Type Trail");
       expect(creativePrompt).toContain("tight / investigation");

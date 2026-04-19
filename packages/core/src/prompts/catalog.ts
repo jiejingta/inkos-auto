@@ -274,6 +274,27 @@ const PROMPT_CATALOG: ReadonlyArray<PromptCatalogEntry> = [
     }],
   },
   {
+    id: "title.refine-chapter",
+    group: "agents",
+    agent: "title-refiner",
+    title: "章节标题复审与重命名",
+    description: "基于 book rules、章节正文和全量历史标题，对章节标题做最终复审、重命名和批量修正。",
+    systemSources: [{
+      label: "System Prompt",
+      relativePath: "agents/title-refiner.ts",
+      startMarker: "const systemPrompt = isEnglish",
+      endMarker: "const userPrompt = isEnglish",
+      maxLines: 90,
+    }],
+    userSources: [{
+      label: "User Prompt",
+      relativePath: "agents/title-refiner.ts",
+      startMarker: "const userPrompt = isEnglish",
+      endMarker: "const prompts = await this.applyPromptOverride(",
+      maxLines: 60,
+    }],
+  },
+  {
     id: "writer.creative-draft",
     group: "agents",
     agent: "writer",

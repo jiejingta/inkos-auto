@@ -8,7 +8,7 @@ const discardReviewStageMock = vi.fn();
 const logMock = vi.fn();
 const logErrorMock = vi.fn();
 
-vi.mock("@actalk/inkos-core", () => ({
+vi.mock("@jiejingtazhu/inkos-core", () => ({
   PipelineRunner: class {
     approveChapter = approveChapterMock;
     approveAllPendingChapters = approveAllPendingChaptersMock;

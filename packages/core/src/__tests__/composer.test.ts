@@ -436,13 +436,13 @@ describe("ComposerAgent", () => {
     });
 
     const selectedSources = result.contextPackage.selectedContext.map((entry) => entry.source);
-    expect(selectedSources).toContain("story/chapter_summaries.md#recent_titles");
+    expect(selectedSources).toContain("story/chapter_summaries.md#historical_titles");
     expect(selectedSources).toContain("story/chapter_summaries.md#recent_mood_type_trail");
     expect(selectedSources).toContain("story/parent_canon.md");
     expect(selectedSources).toContain("story/fanfic_canon.md");
 
     const titleEntry = result.contextPackage.selectedContext.find((entry) =>
-      entry.source === "story/chapter_summaries.md#recent_titles",
+      entry.source === "story/chapter_summaries.md#historical_titles",
     );
     const moodEntry = result.contextPackage.selectedContext.find((entry) =>
       entry.source === "story/chapter_summaries.md#recent_mood_type_trail",

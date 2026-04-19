@@ -269,6 +269,90 @@ writeCommand
   });
 
 writeCommand
+  .command("retitle")
+  .description("Review and retitle chapter names, keeping index / manuscript / summaries in sync")
+  .argument("[args...]", "Book ID (optional) and chapter number")
+  .option("--all", "Retitle all persisted chapters")
+  .option("--from <n>", "Start chapter number for batch retitle")
+  .option("--to <n>", "End chapter number for batch retitle")
+  .option("--json", "Output JSON")
+  .action(async (args: ReadonlyArray<string> | undefined, opts) => {
+    try {
+      const root = findProjectRoot();
+      const resolvedArgs = args ?? [];
+
+      let bookId: string;
+      let chapterNumber: number | undefined;
+      if (resolvedArgs.length === 0) {
+        bookId = await resolveBookId(undefined, root);
+      } else if (resolvedArgs.length === 1) {
+        if (/^\d+$/u.test(resolvedArgs[0] ?? "")) {
+          bookId = await resolveBookId(undefined, root);
+          chapterNumber = parseInt(resolvedArgs[0]!, 10);
+        } else {
+          bookId = await resolveBookId(resolvedArgs[0], root);
+        }
+      } else if (resolvedArgs.length === 2) {
+        bookId = await resolveBookId(resolvedArgs[0], root);
+        chapterNumber = parseInt(resolvedArgs[1]!, 10);
+        if (Number.isNaN(chapterNumber)) {
+          throw new Error(`Expected chapter number, got "${resolvedArgs[1]}"`);
+        }
+      } else {
+        throw new Error("Usage: inkos write retitle [book-id] [chapter] [--all] [--from N] [--to N]");
+      }
+
+      const state = new StateManager(root);
+      const book = await state.loadBookConfig(bookId);
+      const language = resolveCliLanguage(book.language);
+      const config = await loadConfig();
+      const pipeline = new PipelineRunner(buildPipelineConfig(config, root));
+
+      const result = await pipeline.retitleChapters(bookId, {
+        chapterNumber: opts.all ? undefined : chapterNumber,
+        fromChapter: opts.all || opts.from ? parseInt(opts.from ?? "1", 10) : undefined,
+        toChapter: opts.all && opts.to ? parseInt(opts.to, 10) : (opts.to ? parseInt(opts.to, 10) : undefined),
+      });
+
+      if (opts.json) {
+        log(JSON.stringify(result, null, 2));
+        return;
+      }
+
+      const changed = result.chapters.filter((entry: { changed: boolean }) => entry.changed);
+      if (changed.length === 0) {
+        log(language === "en"
+          ? "All selected chapter titles already meet the current title rules."
+          : "所选章节标题已符合当前标题规则，无需改动。");
+        return;
+      }
+
+      for (const entry of result.chapters as ReadonlyArray<{
+        chapterNumber: number;
+        previousTitle: string;
+        title: string;
+        changed: boolean;
+      }>) {
+        if (!entry.changed) continue;
+        log(language === "en"
+          ? `Chapter ${entry.chapterNumber}: "${entry.previousTitle}" -> "${entry.title}"`
+          : `第${entry.chapterNumber}章：\"${entry.previousTitle}\" -> \"${entry.title}\"`);
+      }
+      log("");
+      log(language === "en"
+        ? `${result.changedCount} chapter titles updated.`
+        : `已更新 ${result.changedCount} 个章节标题。`);
+    } catch (e) {
+      if (opts.json) {
+        log(JSON.stringify({ error: String(e) }));
+      } else {
+        logError(`Failed to retitle chapters: ${e}`);
+      }
+      process.exit(1);
+    }
+  });
+
+writeCommand
   .command("repair-state")
   .description("Rebuild truth files for a persisted state-degraded chapter without rewriting body text")
   .argument("<args...>", "Book ID (optional) and chapter number")

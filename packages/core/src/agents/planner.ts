@@ -18,6 +18,7 @@ export interface PlanChapterInput {
   readonly bookDir: string;
   readonly chapterNumber: number;
   readonly externalContext?: string;
+  readonly ignoreCurrentFocus?: boolean;
 }
 
 export interface PlanChapterOutput {
@@ -57,7 +58,9 @@ export class PlannerAgent extends BaseAgent {
       currentState,
     ] = await Promise.all([
       this.readFileOrDefault(sourcePaths.authorIntent),
-      this.readFileOrDefault(sourcePaths.currentFocus),
+      input.ignoreCurrentFocus
+        ? Promise.resolve("")
+        : this.readFileOrDefault(sourcePaths.currentFocus),
       this.readFileOrDefault(sourcePaths.storyBible),
       this.readFileOrDefault(sourcePaths.volumeOutline),
       this.readFileOrDefault(sourcePaths.chapterSummaries),

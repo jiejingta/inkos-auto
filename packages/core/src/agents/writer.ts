@@ -35,7 +35,7 @@ import { renderChapterSummariesProjection } from "../state/state-projections.js"
 import { parsePendingHooksMarkdown } from "../utils/memory-retrieval.js";
 import { analyzeHookHealth } from "../utils/hook-health.js";
 import { buildEnglishVarianceBrief } from "../utils/long-span-fatigue.js";
-import { readFile, writeFile, mkdir, readdir } from "node:fs/promises";
+import { readFile, writeFile, mkdir, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 
 export interface WriteChapterInput {
@@ -672,7 +672,10 @@ export class WriterAgent extends BaseAgent {
     const paddedNum = String(output.chapterNumber).padStart(4, "0");
     const existingFiles = await readdir(chaptersDir).catch(() => [] as string[]);
     const existingFile = existingFiles.find((fileName) => fileName.startsWith(paddedNum) && fileName.endsWith(".md"));
-    const filename = existingFile ?? `${paddedNum}_${this.sanitizeFilename(output.title)}.md`;
+    const desiredFilename = `${paddedNum}_${this.sanitizeFilename(output.title)}.md`;
+    const filename = existingFile && existingFile === desiredFilename
+      ? existingFile
+      : desiredFilename;
     const heading = language === "en"
       ? `# Chapter ${output.chapterNumber}: ${output.title}`
       : `# 第${output.chapterNumber}章 ${output.title}`;
@@ -683,6 +686,9 @@ export class WriterAgent extends BaseAgent {
     ].join("\n");
 
     await writeFile(join(chaptersDir, filename), chapterContent, "utf-8");
+    if (existingFile && existingFile !== filename) {
+      await rm(join(chaptersDir, existingFile), { force: true });
+    }
   }
 
   async savePrimaryTruthFiles(

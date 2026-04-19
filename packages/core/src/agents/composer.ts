@@ -210,24 +210,24 @@ export class ComposerAgent extends BaseAgent {
       return [];
     }
 
-    const recentSummaries = parseChapterSummariesMarkdown(content)
+    const historicalSummaries = parseChapterSummariesMarkdown(content)
       .filter((summary) => summary.chapter < chapterNumber)
-      .sort((left, right) => right.chapter - left.chapter)
-      .slice(0, 5);
-    if (recentSummaries.length === 0) {
+      .sort((left, right) => left.chapter - right.chapter);
+    if (historicalSummaries.length === 0) {
       return [];
     }
+    const recentSummaries = [...historicalSummaries].slice(-5).reverse();
 
     const entries: ContextPackage["selectedContext"] = [];
-    const recentTitles = recentSummaries
+    const historicalTitles = historicalSummaries
       .map((summary) => [summary.chapter, summary.title].filter(Boolean).join(": "))
       .filter(Boolean)
       .join(" | ");
-    if (recentTitles) {
+    if (historicalTitles) {
       entries.push({
-        source: "story/chapter_summaries.md#recent_titles",
-        reason: "Keep recent title history visible to avoid repetitive chapter naming.",
-        excerpt: recentTitles,
+        source: "story/chapter_summaries.md#historical_titles",
+        reason: "Keep full historical title history visible to avoid repetitive chapter naming.",
+        excerpt: historicalTitles,
       });
     }
 

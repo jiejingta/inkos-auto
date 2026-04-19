@@ -213,7 +213,7 @@ export class ChapterAnalyzerAgent extends BaseAgent {
   ): string {
     if (language === "en") {
       const numericalBlock = genreProfile.numericalSystem
-        ? "\n- This genre tracks numerical/resources systems; UPDATED_LEDGER must capture every resource change shown in the chapter."
+        ? "\n- This genre tracks numerical/resources systems; UPDATED_LEDGER must capture every resource change shown in the chapter.\n- If the current ledger still looks like an initialization stub or is obviously stale for this chapter, rebuild a usable full UPDATED_LEDGER instead of leaving it blank or unchanged."
         : "\n- This genre has no numerical system; leave UPDATED_LEDGER empty.";
 
       return `【LANGUAGE OVERRIDE】ALL output MUST be in English. The === TAG === markers remain unchanged.
@@ -307,7 +307,8 @@ Updated character interaction matrix (Markdown table)
     }
 
     const numericalBlock = genreProfile.numericalSystem
-      ? `\n- 本题材有数值/资源体系，你必须在 UPDATED_LEDGER 中追踪正文中出现的所有资源变动`
+      ? `\n- 本题材有数值/资源体系，你必须在 UPDATED_LEDGER 中追踪正文中出现的所有资源变动
+- 如果当前账本看起来仍是“初始化”占位，或明显落后于本章，不要继续留空或原样照抄；必须补出一份可继续滚动的完整 UPDATED_LEDGER`
       : `\n- 本题材无数值系统，UPDATED_LEDGER 留空`;
 
     return `你是小说连续性分析师。你的任务是分析一章已完成的小说正文，从中提取所有状态变化并更新追踪文件。
@@ -462,7 +463,9 @@ ${params.currentState}
 ${ledgerBlock}
 ${params.hooksBlock}${params.volumeSummariesBlock}${params.subplotBlock}${params.emotionalBlock}${params.matrixBlock}${params.summariesBlock}${params.outlineOrControlBlock}${params.bibleBlock}
 
-请严格按照 === TAG === 格式输出分析结果。`;
+请严格按照 === TAG === 格式输出分析结果。
+
+如果“当前资源账本”仍明显停留在初始化阶段，或与本章之后的状态脱节，请在 UPDATED_LEDGER 中顺手补成当前可用版本，不要继续输出“未更新”占位。`;
   }
 
   private buildReducedControlBlock(

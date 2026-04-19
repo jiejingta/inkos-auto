@@ -56,6 +56,29 @@ const COLLECTIVE_SHOCK_PATTERNS = [
   /(?:全场|一片)[，,]?(?:寂静|哗然|沸腾|震动)/,
 ];
 
+const ENGLISH_NAME_STOP_WORDS = new Set([
+  "The",
+  "This",
+  "That",
+  "Those",
+  "These",
+  "There",
+  "Their",
+  "Then",
+  "When",
+  "Where",
+  "While",
+  "After",
+  "Before",
+  "Because",
+  "However",
+  "Whatever",
+  "Someone",
+  "Something",
+  "Everybody",
+  "Nobody",
+]);
+
 // --- Validator ---
 
 export function validatePostWrite(
@@ -566,33 +589,16 @@ function extractParagraphs(content: string): string[] {
     .filter((paragraph) => !paragraph.startsWith("#"));
 }
 
-const ENGLISH_NAME_STOP_WORDS = new Set([
-  "The",
-  "And",
-  "But",
-  "When",
-  "While",
-  "After",
-  "Before",
-  "Even",
-  "Then",
-  "They",
-]);
+const TITLE_PLACEHOLDER_PATTERNS = [
+  /(?:^|[:：\s])(填上|暂定|待补|待定)(?:$|[:：\s])/u,
+  /(?:^|[:：\s])(todo|tbd|placeholder|draft)(?:$|[:：\s])/iu,
+];
 
-const CHINESE_TITLE_STOP_WORDS = new Set([
-  "这次",
-  "正文",
-  "标题",
-  "重复",
-  "不同",
-  "完全",
-  "只是",
-  "碰巧",
-  "没有",
-  "回头",
-]);
-
-const CHINESE_TITLE_STOP_CHARS = new Set(["的", "了", "着", "一", "只", "从", "在", "和", "与", "把", "被", "有", "没", "里", "又", "才"]);
+const TITLE_SHELL_PATCH_PATTERNS = [
+  /[:：]\s*[^\s]{1,4}$/u,
+  /[（(]\d+[)）]$/u,
+  /\s+[ivx]+$/iu,
+];
 
 /**
  * Detect duplicate or near-duplicate chapter titles.
@@ -642,9 +648,6 @@ export function resolveDuplicateTitle(
   newTitle: string,
   existingTitles: ReadonlyArray<string>,
   language: "zh" | "en" = "zh",
-  options?: {
-    readonly content?: string;
-  },
 ): {
   readonly title: string;
   readonly issues: ReadonlyArray<PostWriteViolation>;
@@ -654,42 +657,10 @@ export function resolveDuplicateTitle(
     return { title: newTitle, issues: [] };
   }
 
-  const duplicateIssues = detectDuplicateTitle(trimmed, existingTitles);
-  if (duplicateIssues.length > 0) {
-    const regenerated = regenerateDuplicateTitle(trimmed, existingTitles, language, options?.content);
-    if (regenerated && detectDuplicateTitle(regenerated, existingTitles).length === 0) {
-      return { title: regenerated, issues: duplicateIssues };
-    }
-
-    let counter = 2;
-    while (counter < 100) {
-      const candidate = language === "en"
-        ? `${trimmed} (${counter})`
-        : `${trimmed}（${counter}）`;
-      if (detectDuplicateTitle(candidate, existingTitles).length === 0) {
-        return { title: candidate, issues: duplicateIssues };
-      }
-      counter++;
-    }
-
-    return { title: trimmed, issues: duplicateIssues };
-  }
-
-  const collapseIssues = detectTitleCollapse(trimmed, existingTitles, language);
-  if (collapseIssues.length === 0) {
-    return { title: trimmed, issues: [] };
-  }
-
-  const regenerated = regenerateCollapsedTitle(trimmed, existingTitles, language, options?.content);
-  if (
-    regenerated
-    && detectDuplicateTitle(regenerated, existingTitles).length === 0
-    && detectTitleCollapse(regenerated, existingTitles, language).length === 0
-  ) {
-    return { title: regenerated, issues: collapseIssues };
-  }
-
-  return { title: trimmed, issues: collapseIssues };
+  return {
+    title: trimmed,
+    issues: validateChapterTitle(trimmed, existingTitles, language),
+  };
 }
 
 function detectTitleCollapse(
@@ -700,8 +671,8 @@ function detectTitleCollapse(
   const recentTitles = existingTitles
     .map((title) => title.trim())
     .filter(Boolean)
-    .slice(-3);
-  if (recentTitles.length < 3) {
+    .slice(-12);
+  if (recentTitles.length < 4) {
     return [];
   }
 
@@ -739,115 +710,109 @@ function detectTitleCollapse(
   ];
 }
 
-function regenerateDuplicateTitle(
-  baseTitle: string,
-  existingTitles: ReadonlyArray<string>,
-  language: "zh" | "en",
-  content?: string,
-): string | undefined {
-  if (!content || !content.trim()) {
-    return undefined;
+export function detectLowQualityTitle(
+  newTitle: string,
+  language: "zh" | "en" = "zh",
+  existingTitles: ReadonlyArray<string> = [],
+): ReadonlyArray<PostWriteViolation> {
+  const title = newTitle.trim();
+  if (!title) {
+    return [{
+      rule: "title-empty",
+      severity: "warning",
+      description: language === "en"
+        ? "Chapter title is empty."
+        : "章节标题为空。",
+      suggestion: language === "en"
+        ? "Provide a complete chapter title."
+        : "请补全一个完整章节标题。",
+    }];
   }
 
-  const qualifier = language === "en"
-    ? extractEnglishTitleQualifier(baseTitle, existingTitles, content)
-    : extractChineseTitleQualifier(baseTitle, existingTitles, content);
-  if (!qualifier) {
-    return undefined;
+  const issues: PostWriteViolation[] = [];
+
+  if (/^(第?\d+章|chapter\s+\d+)$/iu.test(title)) {
+    issues.push({
+      rule: "title-placeholder",
+      severity: "warning",
+      description: language === "en"
+        ? `Chapter title "${title}" still looks like a placeholder heading.`
+        : `章节标题"${title}"仍然像占位标题。`,
+      suggestion: language === "en"
+        ? "Replace it with a real chapter title."
+        : "请换成真正的章节标题。",
+    });
   }
 
-  return language === "en"
-    ? `${baseTitle}: ${qualifier}`
-    : `${baseTitle}：${qualifier}`;
-}
-
-function regenerateCollapsedTitle(
-  baseTitle: string,
-  existingTitles: ReadonlyArray<string>,
-  language: "zh" | "en",
-  content?: string,
-): string | undefined {
-  if (!content || !content.trim()) {
-    return undefined;
+  if (TITLE_PLACEHOLDER_PATTERNS.some((pattern) => pattern.test(title))) {
+    issues.push({
+      rule: "title-placeholder",
+      severity: "warning",
+      description: language === "en"
+        ? `Chapter title "${title}" still contains placeholder wording.`
+        : `章节标题"${title}"仍带有占位词。`,
+      suggestion: language === "en"
+        ? "Rename the chapter with a finished, publication-ready title."
+        : "请换成正式可发布的完整标题。",
+    });
   }
 
-  const fresh = language === "en"
-    ? extractEnglishTitleQualifier(baseTitle, existingTitles, content)
-    : extractChineseTitleQualifier(baseTitle, existingTitles, content);
-  if (!fresh) {
-    return undefined;
-  }
-
-  return fresh === baseTitle ? undefined : fresh;
-}
-
-function extractEnglishTitleQualifier(
-  baseTitle: string,
-  existingTitles: ReadonlyArray<string>,
-  content: string,
-): string | undefined {
-  const blocked = new Set(extractEnglishTitleTerms([baseTitle, ...existingTitles].join(" ")));
-  const words = (content.match(/[A-Za-z]{4,}/g) ?? [])
-    .map((word) => word.toLowerCase())
-    .filter((word) => !ENGLISH_NAME_STOP_WORDS.has(capitalize(word)))
-    .filter((word) => !blocked.has(word));
-  const first = words[0];
-  if (!first) {
-    return undefined;
-  }
-
-  const second = words.find((word) => word !== first && !blocked.has(word));
-  return second
-    ? `${capitalize(first)} ${capitalize(second)}`
-    : capitalize(first);
-}
-
-function extractChineseTitleQualifier(
-  baseTitle: string,
-  existingTitles: ReadonlyArray<string>,
-  content: string,
-): string | undefined {
-  const blocked = new Set(extractChineseTitleTerms([baseTitle, ...existingTitles].join("")));
-  const segments = content.match(/[\u4e00-\u9fff]+/g) ?? [];
-
-  for (const segment of segments) {
-    for (let start = 0; start < segment.length; start += 1) {
-      for (let size = 2; size <= 4; size += 1) {
-        const candidate = segment.slice(start, start + size).trim();
-        if (candidate.length < 2) continue;
-        if (CHINESE_TITLE_STOP_WORDS.has(candidate)) continue;
-        if ([...candidate].some((char) => CHINESE_TITLE_STOP_CHARS.has(char))) continue;
-        if (blocked.has(candidate)) continue;
-        return candidate;
-      }
+  if (language === "zh") {
+    const cjkChars = (title.match(/[\u4e00-\u9fff]/gu) ?? []).length;
+    if (cjkChars > 0 && cjkChars < 4) {
+      issues.push({
+        rule: "title-too-short",
+        severity: "warning",
+        description: `章节标题"${title}"信息量过低，长度明显偏短。`,
+        suggestion: "请换成更完整、更有辨识度的标题。",
+      });
+    }
+  } else {
+    const words = title.match(/[A-Za-z]{2,}/g) ?? [];
+    if (words.length < 2) {
+      issues.push({
+        rule: "title-too-short",
+        severity: "warning",
+        description: `Chapter title "${title}" is too thin to stand on its own.`,
+        suggestion: "Use a fuller, more distinctive title.",
+      });
     }
   }
 
-  return undefined;
-}
-
-function extractEnglishTitleTerms(text: string): string[] {
-  return [...new Set((text.match(/[A-Za-z]{4,}/g) ?? []).map((word) => word.toLowerCase()))];
-}
-
-function extractChineseTitleTerms(text: string): string[] {
-  const terms = new Set<string>();
-  const segments = text.match(/[\u4e00-\u9fff]+/g) ?? [];
-
-  for (const segment of segments) {
-    for (let start = 0; start < segment.length; start += 1) {
-      for (let size = 2; size <= 4; size += 1) {
-        const candidate = segment.slice(start, start + size).trim();
-        if (candidate.length < 2) continue;
-        if ([...candidate].some((char) => CHINESE_TITLE_STOP_CHARS.has(char))) continue;
-        terms.add(candidate);
-      }
+  const colonIndex = Math.max(title.lastIndexOf("："), title.lastIndexOf(":"));
+  if (colonIndex > 0) {
+    const baseTitle = title.slice(0, colonIndex).trim();
+    const suffix = title.slice(colonIndex + 1).trim();
+    if (
+      suffix.length > 0
+      && suffix.length <= 4
+      && TITLE_SHELL_PATCH_PATTERNS.some((pattern) => pattern.test(title))
+      && detectDuplicateTitle(baseTitle, existingTitles).length > 0
+    ) {
+      issues.push({
+        rule: "title-shell-patch",
+        severity: "warning",
+        description: language === "en"
+          ? `Chapter title "${title}" looks like a suffix patch on top of an already-used shell.`
+          : `章节标题"${title}"看起来像是在旧标题壳上机械补尾。`,
+        suggestion: language === "en"
+          ? "Replace the whole title instead of patching the old one."
+          : "不要补尾规避重复，请整体重起一个标题。",
+      });
     }
   }
 
-  return [...terms];
+  return issues;
 }
 
-function capitalize(word: string): string {
-  return word.length === 0 ? word : `${word[0]!.toUpperCase()}${word.slice(1)}`;
+export function validateChapterTitle(
+  newTitle: string,
+  existingTitles: ReadonlyArray<string>,
+  language: "zh" | "en" = "zh",
+): ReadonlyArray<PostWriteViolation> {
+  return [
+    ...detectDuplicateTitle(newTitle, existingTitles),
+    ...detectTitleCollapse(newTitle, existingTitles, language),
+    ...detectLowQualityTitle(newTitle, language, existingTitles),
+  ];
 }

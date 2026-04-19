@@ -1,9 +1,11 @@
 import { describe, it, expect } from "vitest";
 import {
   detectDuplicateTitle,
+  detectLowQualityTitle,
   detectParagraphLengthDrift,
   detectParagraphShapeWarnings,
   resolveDuplicateTitle,
+  validateChapterTitle,
   validatePostWrite,
   type PostWriteViolation,
 } from "../agents/post-write-validator.js";
@@ -246,32 +248,26 @@ describe("validatePostWrite", () => {
     expect(findRule(result, "near-duplicate-title")).toBeDefined();
   });
 
-  it("prefers regenerating a duplicate title from chapter content before numeric suffix fallback", () => {
-    const result = resolveDuplicateTitle(
-      "回声",
-      ["旧路", "回声"],
-      "zh",
-      {
-        content: "塔楼里的铜铃只响了一声，风从缺口灌进来，守夜人没有回头。",
-      },
-    );
+  it("does not mechanically auto-rename duplicate titles", () => {
+    const result = resolveDuplicateTitle("回声", ["旧路", "回声"], "zh");
 
-    expect(result.title).toContain("塔楼");
-    expect(result.title).not.toBe("回声（2）");
+    expect(result.title).toBe("回声");
+    expect(result.issues.some((issue) => issue.rule === "duplicate-title")).toBe(true);
   });
 
-  it("regenerates a title when it continues a collapsed recent title shell", () => {
-    const result = resolveDuplicateTitle(
-      "名单未落",
-      ["名单之前", "名单之后", "名单还在"],
+  it("flags low-information short Chinese titles", () => {
+    const result = detectLowQualityTitle("门下", "zh");
+
+    expect(result.some((issue) => issue.rule === "title-too-short")).toBe(true);
+  });
+
+  it("flags patched shell titles that just append a short suffix", () => {
+    const result = validateChapterTitle(
+      "女神的欠条与三枚硬币：填上",
+      ["女神的欠条与三枚硬币"],
       "zh",
-      {
-        content: "塔楼里的铜铃只响了一声，守夜人没有回头，风从缺口灌进来。",
-      },
     );
 
-    expect(result.issues.some((issue) => issue.rule === "title-collapse")).toBe(true);
-    expect(result.title).not.toContain("名单");
-    expect(result.title).toContain("塔楼");
+    expect(result.some((issue) => issue.rule === "title-shell-patch" || issue.rule === "title-placeholder")).toBe(true);
   });
 });

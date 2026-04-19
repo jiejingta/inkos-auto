@@ -87,7 +87,7 @@
 
 当前实现下，InkOS 里真正发给模型的主要 prompt 入口，已经被整理成一份可读目录，并暴露给 Studio 页面：
 
-- agents：`architect.*`、`chapter-analyzer.extract-state`、`consolidator.volume-summary`、`continuity.audit-chapter`、`fanfic-canon-importer.import-canon`、`foundation-reviewer.review-foundation`、`length-normalizer.normalize-length`、`radar.market-analysis`、`reviser.revise-chapter`、`state-validator.validate-state`、`writer.creative-draft`、`writer.observe-chapter`、`writer.settle-state`
+- agents：`architect.*`、`chapter-analyzer.extract-state`、`consolidator.volume-summary`、`continuity.audit-chapter`、`fanfic-canon-importer.import-canon`、`foundation-reviewer.review-foundation`、`length-normalizer.normalize-length`、`radar.market-analysis`、`reviser.revise-chapter`、`state-validator.validate-state`、`title.refine-chapter`、`writer.creative-draft`、`writer.observe-chapter`、`writer.settle-state`
 - interaction：`interaction.develop-book-draft`、`interaction.chat`
 - pipeline：`pipeline.agent-loop`、`pipeline.style-guide`、`pipeline.parent-canon`
 
@@ -122,10 +122,17 @@ override 的持久化位置：
 1. `writeNextChapter()`
 2. Planner / Composer 生成治理输入
 3. Writer 产出正文
-4. Auditor 审计
-5. 若存在阻断性问题，则进入 Reviser
-6. 若最终状态是 `ready-for-review`，正式 truth files / snapshot 一次性落盘
-7. 若最终状态是 `audit-failed`，章节正文会落盘，但候选 truth 只进 review staging，不覆盖正式 `story/*`
+4. Title Refiner 读取 `book_rules` + 全量历史标题，对章节标题做最终复审，禁止本地机械补尾式改名
+5. Auditor 审计
+6. 若存在阻断性问题，则进入 Reviser
+7. 若最终状态是 `ready-for-review`，正式 truth files / snapshot 一次性落盘
+8. 若最终状态是 `audit-failed`，章节正文会落盘，但候选 truth 只进 review staging，不覆盖正式 `story/*`
+
+补充：
+
+- `current_focus.md` 不再只在建书时初始化一次。只要“最新章节”正式向前推进，runner 就会为“下一章”重新生成 focus 并覆盖 `story/current_focus.md`。这条刷新路径已覆盖：正常写章通过、手动 revise 后通过、`repair-state` / `sync` 成功、import replay 完成，以及 `review approve` / `approve-all` 提交最新章节的 staged truth。
+- 这次 refresh 会显式忽略旧的 `current_focus.md` 内容，避免旧的人工指令或过期 rework 目标把 planner 长期锁死在早期章节。
+- `particle_ledger.md` 现在有“失管检测”。当账本长期停留在初始化/占位状态，而当前题材又启用了数值体系时，流水线会优先复用本次 settle 或 final analyzer 已经产出的账本结果来修复；只有仍拿不到有效账本时，才额外回退到一次 analyzer 重建，尽量减少 API 调用。
 
 ### 3.2 守护调度
 
@@ -149,6 +156,8 @@ override 的持久化位置：
 
 - `packages/core/src/agents/continuity.ts`
   - 审计 prompt、解析、代码层审核门槛、重复 warning 判定都在这里。
+- `packages/core/src/agents/planner.ts`
+  - `current_focus.md` 刷新时会通过 `ignoreCurrentFocus` 模式重规划下一章目标，避免旧 focus 污染新一轮计划。
 - `packages/core/src/pipeline/chapter-review-cycle.ts`
   - 控制“先审、失败则修、修后再审”的自动循环。
 - `packages/core/src/pipeline/revision-strategy.ts`
@@ -156,15 +165,19 @@ override 的持久化位置：
 - `packages/core/src/pipeline/scheduler.ts`
   - `inkos up` 的自动推进规则在这里。
 - `packages/core/src/pipeline/runner.ts`
-  - 单章完整流水线、手动 `auditDraft` / `reviseDraft` / `writeNextChapter` 的主入口。
+  - 单章完整流水线、手动 `auditDraft` / `reviseDraft` / `writeNextChapter` 的主入口；同时负责 `current_focus.md` 自动滚动，以及 `particle_ledger.md` 的失管检测/低调用量回填。
 - `packages/core/src/pipeline/chapter-persistence.ts`
   - chapter index 写入格式，以及 `ready-for-review` / `audit-failed` / `state-degraded` 三种落盘分流。
+- `packages/core/src/agents/title-refiner.ts`
+  - 章节标题专用复审与重命名 agent。会吃 `book_rules` 正文、章节内容和全量历史标题，强制避免“旧标题+补尾”的机械改名。
 - `packages/core/src/pipeline/chapter-state-recovery.ts`
   - `state-degraded` 的降级保存与恢复元数据。
 - `packages/core/src/state/manager.ts`
   - review staging 的目录结构、promote/discard、rollback 时的清理。
 - `packages/cli/src/commands/review.ts`
   - 手动 `approve` / `approve-all` 现在会真正提交 staged truth，而不只是改状态。
+- `packages/cli/src/commands/write.ts`
+  - 新增 `inkos write retitle`，可单章或按区间批量重命名章节标题，并同步 `chapters/index.json`、章节正文首行、`chapter_summaries.*` 和快照里的标题。
 - `packages/cli/src/commands/daemon.ts`
   - 守护进程启动/停止与完成日志输出。
 - `packages/core/src/prompts/catalog.ts`

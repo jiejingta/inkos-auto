@@ -26,7 +26,7 @@ export function buildGovernedMemoryEvidenceBlocks(
     entry.source.startsWith("story/volume_summaries.md#"),
   );
   const titleHistoryEntries = contextPackage.selectedContext.filter((entry) =>
-    entry.source === "story/chapter_summaries.md#recent_titles",
+    entry.source === "story/chapter_summaries.md#historical_titles",
   );
   const moodTrailEntries = contextPackage.selectedContext.filter((entry) =>
     entry.source === "story/chapter_summaries.md#recent_mood_type_trail",
@@ -63,7 +63,7 @@ export function buildGovernedMemoryEvidenceBlocks(
       : undefined,
     titleHistoryBlock: titleHistoryEntries.length > 0
       ? renderEvidenceBlock(
-          resolvedLanguage === "en" ? "Recent Title History" : "近期标题历史",
+          resolvedLanguage === "en" ? "Historical Title History" : "历史标题全表",
           titleHistoryEntries,
         )
       : undefined,

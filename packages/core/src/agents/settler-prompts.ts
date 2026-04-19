@@ -12,7 +12,8 @@ export function buildSettlerSystemPrompt(
   const isEnglish = resolvedLang === "en";
   const numericalBlock = genreProfile.numericalSystem
     ? `\n- 本题材有数值/资源体系，你必须在 UPDATED_LEDGER 中追踪正文中出现的所有资源变动
-- 数值验算铁律：期初 + 增量 = 期末，三项必须可验算`
+- 数值验算铁律：期初 + 增量 = 期末，三项必须可验算
+- 如果当前账本仍停留在“初始化”或明显落后于当前章，不要继续留空或沿用占位符；必须基于既有账本与正文事实补出一份可继续滚动的完整 UPDATED_LEDGER`
     : `\n- 本题材无数值系统，UPDATED_LEDGER 留空`;
 
   const hookRules = `
@@ -226,5 +227,7 @@ ${params.hooks}
 ${selectedEvidenceBlock}${summariesBlock}${subplotBlock}${emotionalBlock}${matrixBlock}
 ${outlineBlock}
 
-请严格按照 === TAG === 格式输出结算结果。`;
+请严格按照 === TAG === 格式输出结算结果。
+
+如果你发现“当前资源账本”仍是初始化占位、没有真实流水，或明显停留在很早的章节，请在本次 UPDATED_LEDGER 中顺手补齐为当前可用版本，不要继续输出“未更新”占位。`;
 }
