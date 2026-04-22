@@ -1245,11 +1245,7 @@ describe("PipelineRunner", () => {
     try {
       await runner.writeNextChapter(bookId, 220);
 
-      expect(planChapter).toHaveBeenCalledTimes(2);
-      expect(planChapter.mock.calls[1]?.[0]).toMatchObject({
-        chapterNumber: 2,
-        ignoreCurrentFocus: true,
-      });
+      expect(planChapter).toHaveBeenCalledTimes(1);
       expect(composeChapter).toHaveBeenCalledTimes(1);
       const writeInput = writeChapter.mock.calls[0]?.[0];
       expect(writeInput?.chapterIntent).toContain("# Chapter Intent");
@@ -1332,11 +1328,7 @@ describe("PipelineRunner", () => {
     try {
       await runner.writeNextChapter(bookId, 220);
 
-      expect(planChapter).toHaveBeenCalledTimes(2);
-      expect(planChapter.mock.calls[1]?.[0]).toMatchObject({
-        chapterNumber: 2,
-        ignoreCurrentFocus: true,
-      });
+      expect(planChapter).toHaveBeenCalledTimes(1);
       const writeInput = writeChapter.mock.calls[0]?.[0];
       expect(writeInput?.chapterIntent).toContain("Track the merchant guild trail.");
       expect(writeInput?.chapterIntent).not.toContain("\n**\n");
@@ -2856,10 +2848,7 @@ describe("PipelineRunner", () => {
     const savedIndex = await state.loadChapterIndex(bookId);
 
     expect(result.promotedReviewStage).toBe(true);
-    expect(planChapter).toHaveBeenCalledWith(expect.objectContaining({
-      chapterNumber: 2,
-      ignoreCurrentFocus: true,
-    }));
+    expect(planChapter).not.toHaveBeenCalled();
     expect(savedIndex[0]?.status).toBe("approved");
     await expect(readFile(join(storyDir, "current_state.md"), "utf-8")).resolves.toContain("| Current Chapter | 1 |");
     await expect(readFile(join(storyDir, "pending_hooks.md"), "utf-8")).resolves.toContain("berth-signal");

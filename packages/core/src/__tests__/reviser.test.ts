@@ -89,6 +89,7 @@ describe("ReviserAgent", () => {
 
       expect(systemPrompt).toContain("MUST be in English");
       expect(systemPrompt).toContain("written entirely in English");
+      expect(systemPrompt).toContain("Universal Writing Rules");
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -215,6 +216,8 @@ describe("ReviserAgent", () => {
       const userPrompt = messages?.[1]?.content ?? "";
 
       expect(systemPrompt).toContain("保持章节字数在目标区间内");
+      expect(systemPrompt).toContain("## 核心规则");
+      expect(systemPrompt).toContain("## 硬性禁令");
       expect(systemPrompt).toContain("=== PATCHES ===");
       expect(systemPrompt).not.toContain("=== REVISED_CONTENT ===");
       expect(userPrompt).toContain("目标字数：220");

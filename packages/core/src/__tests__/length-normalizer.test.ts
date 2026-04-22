@@ -3,6 +3,9 @@ import { BaseAgent } from "../agents/base.js";
 import { LengthNormalizerAgent } from "../agents/length-normalizer.js";
 import { LengthSpecSchema } from "../models/length-governance.js";
 import { countChapterLength } from "../utils/length-metrics.js";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const ZERO_USAGE = {
   promptTokens: 0,
@@ -247,5 +250,68 @@ describe("LengthNormalizerAgent", () => {
 
     expect(chatSpy).toHaveBeenCalledTimes(1);
     expect(result.normalizedContent).toBe(prose);
+  });
+
+  it("loads writer global rules when book context is available", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-length-normalizer-rules-"));
+    const bookDir = join(root, "book");
+    await mkdir(join(bookDir, "story"), { recursive: true });
+    await Promise.all([
+      writeFile(
+        join(bookDir, "book.json"),
+        JSON.stringify({
+          id: "book",
+          title: "Book",
+          genre: "other",
+          platform: "tomato",
+          chapterWordCount: 220,
+          targetChapters: 20,
+          status: "active",
+          language: "zh",
+          createdAt: "2026-04-21T00:00:00.000Z",
+          updatedAt: "2026-04-21T00:00:00.000Z",
+        }, null, 2),
+        "utf-8",
+      ),
+      writeFile(join(bookDir, "story", "style_guide.md"), "# 文风指南\n\n- 保持克制。", "utf-8"),
+    ]);
+
+    const agent = new LengthNormalizerAgent({
+      ...AGENT_CONTEXT,
+      projectRoot: root,
+    } as never);
+    const chatSpy = vi.spyOn(BaseAgent.prototype as never, "chat").mockResolvedValue({
+      content: "压缩后的正文。",
+      usage: ZERO_USAGE,
+    });
+    const lengthSpec = LengthSpecSchema.parse({
+      target: 220,
+      softMin: 190,
+      softMax: 250,
+      hardMin: 160,
+      hardMax: 280,
+      countingMode: "zh_chars",
+      normalizeMode: "compress",
+    });
+
+    try {
+      await agent.normalizeChapter({
+        chapterContent: "原文。".repeat(80),
+        lengthSpec,
+        bookDir,
+        genre: "other",
+        chapterNumber: 3,
+      });
+
+      const messages = chatSpy.mock.calls[0]?.[0] as
+        | ReadonlyArray<{ content: string }>
+        | undefined;
+      const systemPrompt = messages?.[0]?.content ?? "";
+      expect(systemPrompt).toContain("## 核心规则");
+      expect(systemPrompt).toContain("## 硬性禁令");
+      expect(systemPrompt).toContain("## 文风指南");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });

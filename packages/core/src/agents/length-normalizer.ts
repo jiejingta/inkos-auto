@@ -1,12 +1,19 @@
 import { BaseAgent } from "./base.js";
 import type { LengthNormalizeMode, LengthSpec } from "../models/length-governance.js";
 import { countChapterLength, chooseNormalizeMode, isOutsideHardRange, isOutsideSoftRange } from "../utils/length-metrics.js";
+import { readBookLanguage, readBookRules, readGenreProfile } from "./rules-reader.js";
+import { buildWriterGlobalRulesPrompt } from "./writer-prompts.js";
+import { join } from "node:path";
+import { readFile } from "node:fs/promises";
 
 export interface NormalizeLengthInput {
   readonly chapterContent: string;
   readonly lengthSpec: LengthSpec;
   readonly chapterIntent?: string;
   readonly reducedControlBlock?: string;
+  readonly bookDir?: string;
+  readonly genre?: string;
+  readonly chapterNumber?: number;
 }
 
 export interface NormalizeLengthOutput {
@@ -42,7 +49,8 @@ export class LengthNormalizerAgent extends BaseAgent {
       };
     }
 
-    const systemPrompt = this.buildSystemPrompt(mode);
+    const globalWritingRules = await this.buildGlobalWritingRules(input);
+    const systemPrompt = this.buildSystemPrompt(mode, globalWritingRules);
     const userPrompt = this.buildUserPrompt(input, originalCount, mode);
     const prompts = await this.applyPromptOverride("length-normalizer.normalize-length", {
       system: systemPrompt,
@@ -73,7 +81,7 @@ export class LengthNormalizerAgent extends BaseAgent {
     };
   }
 
-  private buildSystemPrompt(mode: LengthNormalizeMode): string {
+  private buildSystemPrompt(mode: LengthNormalizeMode, globalWritingRules: string): string {
     const action = mode === "compress"
       ? "compress"
       : "expand";
@@ -84,7 +92,9 @@ export class LengthNormalizerAgent extends BaseAgent {
 - ${action} 章节长度到给定目标区间
 - 保留章节原有事实、关键钩子、角色名和必须保留的标记
 - 不要引入新的支线、未来揭示或额外总结
-- 不要在正文外输出任何解释`;
+- 不要在正文外输出任何解释
+
+${globalWritingRules}`.trim();
   }
 
   private buildUserPrompt(
@@ -203,5 +213,44 @@ ${input.chapterContent}`;
     }
 
     return false;
+  }
+
+  private async buildGlobalWritingRules(input: NormalizeLengthInput): Promise<string> {
+    if (!input.bookDir) {
+      return "";
+    }
+
+    const genreId = input.genre ?? "other";
+    const [{ profile: genreProfile, body: genreBody }, bookLanguage, parsedRules, styleGuideRaw] = await Promise.all([
+      readGenreProfile(this.ctx.projectRoot, genreId),
+      readBookLanguage(input.bookDir),
+      readBookRules(input.bookDir),
+      this.readFileSafe(join(input.bookDir, "story/style_guide.md")),
+    ]);
+
+    const resolvedLanguage = (bookLanguage ?? genreProfile.language) === "en" ? "en" : "zh";
+    const styleGuide = styleGuideRaw !== "(文件不存在)"
+      ? styleGuideRaw
+      : (parsedRules?.body ?? "(无文风指南)");
+
+    return buildWriterGlobalRulesPrompt({
+      genreProfile,
+      bookRules: parsedRules?.rules ?? null,
+      bookRulesBody: parsedRules?.body ?? "",
+      genreBody,
+      styleGuide,
+      chapterNumber: input.chapterNumber,
+      languageOverride: resolvedLanguage,
+      inputProfile: input.reducedControlBlock ? "governed" : "legacy",
+      lengthSpec: input.lengthSpec,
+    });
+  }
+
+  private async readFileSafe(path: string): Promise<string> {
+    try {
+      return await readFile(path, "utf-8");
+    } catch {
+      return "(文件不存在)";
+    }
   }
 }

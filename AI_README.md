@@ -44,7 +44,8 @@
 - 手动 `inkos write next` 也已经接上同样的前置护栏。只要历史里还存在不是 `approved` / `published` / `imported` 的章节，就不会继续往后写。
 - `review approve` 不再只是改 chapter index；如果目标章节是 `audit-failed`，会先把 staged truth promote 到正式 `story/*`，再更新 snapshot 与记忆索引。
 - 对于 401/403、Anthropic 鉴权缺失、明显的模型缺失或 baseUrl 错配等非重试型运行错误，守护器会立即暂停该书；普通 400 不再直接判死，而是保留重试并把原始错误文本写进日志，方便继续判断是字段兼容、上下文长度还是内容审查问题。
-- provider 层现在区分两种温度约束：`kimi-k2.5` / `thinking` 类模型强制 `temperature=1`；`kimi-for-coding` 这类只允许 `<=1` 的模型会做上限夹制，避免 scheduler 的 retry temperature 把请求抬到 1.0 以上。
+- provider 层不再区分 Kimi 专用温度钳制；现在统一使用全局温度上限 `<= 1.0`。scheduler 的 retry temperature 也同步封顶到 `1.0`，从源头避免把请求温度抬过接口上限。
+- provider 层现在会在单次 API 调用内部自动重试瞬时上游错误（如 `429`、`529`、`502/503/504`、超时、连接重置），优先在当前环节内消化波动，避免直接把整章流水线从头重跑。
 
 ### 2.2 审计门槛
 
@@ -57,8 +58,7 @@
 
 - 只要存在任何 `critical` 问题，拒绝。
 - 只要存在任何会污染长期故事状态的 `warning`，拒绝。
-- 存在 3 个或更多普通 `warning`，拒绝。
-- 相同 warning 类别在连续 2 章重复出现，拒绝。
+- 存在 6 个或更多普通 `warning`，拒绝。
 - 只有 `info`，或仅有 1 个轻微表面 warning 时，通常通过。
 
 当前被视为“污染长期状态”的 warning，重点看这些方向：
@@ -75,6 +75,7 @@
 - `write next` 的审计失败后，不再只对 `critical` 自动修；只要是阻断性 `warning` / `critical`，都会尝试进入一次自动修订。
 - 自动修订不再永远死锁在 `spot-fix`：如果命中 `大纲偏离检测`、`读者期待管理`、世界规则漂移、时间线矛盾、角色动机/关系连续性断裂等结构性问题，会自动升级到 `rework`；若同一章连续失败已到 4 次，或同时出现多个结构性 `critical`，会直接升级到 `rewrite`。
 - 多模型路由里，运行时实际识别的章节审计和修订键名是 `auditor` 与 `reviser`。无人值守场景推荐把两者拆开：`auditor` 用更严格、更稳定的审计模型，`reviser` 用更强的长文改写模型。
+- `writer` 的全局写作规则（核心规则、硬性禁令、文风/书规）现在也会注入给 `reviser` 与 `length-normalizer`，不再只有 `writer` 独享完整写作护栏。
 
 ### 2.3 提示词现在可集中查看和项目级覆盖
 
@@ -131,8 +132,10 @@ override 的持久化位置：
 补充：
 
 - `current_focus.md` 不再只在建书时初始化一次。只要“最新章节”正式向前推进，runner 就会为“下一章”重新生成 focus 并覆盖 `story/current_focus.md`。这条刷新路径已覆盖：正常写章通过、手动 revise 后通过、`repair-state` / `sync` 成功、import replay 完成，以及 `review approve` / `approve-all` 提交最新章节的 staged truth。
-- 这次 refresh 会显式忽略旧的 `current_focus.md` 内容，避免旧的人工指令或过期 rework 目标把 planner 长期锁死在早期章节。
+- `current_focus.md` 现在改成本地轻量刷新，不再为此额外调用一次 planner。它主要复用 `story/runtime/chapter-XXXX.intent.md` 里的最近 intent 信息来滚动到“下一章”，从而避免一边写章一边多耗一次规划调用。
 - `particle_ledger.md` 现在有“失管检测”。当账本长期停留在初始化/占位状态，而当前题材又启用了数值体系时，流水线会优先复用本次 settle 或 final analyzer 已经产出的账本结果来修复；只有仍拿不到有效账本时，才额外回退到一次 analyzer 重建，尽量减少 API 调用。
+- 最终正文在落盘前会再跑一轮本地阻断校验：如果修订后又引入了“第X章”元叙事、角色讨论自己处在第几章、禁用句式等硬错误，会触发一次额外的 spot-fix，并重新合并审计结果，避免这类错误直接漏进正式章节。
+- 章节正文文件在落盘前会清洗顶部残留 heading。无论是写新章、修订章节还是批量重命名，都会先剥掉正文里残留的旧标题，再统一写入新的正式标题，避免出现“双标题”开头。
 
 ### 3.2 守护调度
 
@@ -145,6 +148,7 @@ override 的持久化位置：
 2. 在写新章前清理历史未通过章节
 3. 对通过审计的章节自动 approve，并处理失败计数/暂停逻辑
 4. 若写作尝试在审计前就抛异常，额外输出明确的 runtime error 日志；Studio 守护页会直接显示 `daemon:error` 的错误文本，不再只显示书名
+5. 对于瞬时上游请求错误（`429` / `529` / `502/503/504` / 超时 / 连接重置），调度器不再立刻把它记进审计失败预算并原地重跑整章；provider 会先在当前调用内重试，若仍失败，则把这次写作延后到下一次 scheduler tick。
 
 当前默认阈值：
 
@@ -155,9 +159,9 @@ override 的持久化位置：
 ## 4. 关键文件速查
 
 - `packages/core/src/agents/continuity.ts`
-  - 审计 prompt、解析、代码层审核门槛、重复 warning 判定都在这里。
+  - 审计 prompt、解析、代码层审核门槛都在这里；当前二次裁决是固定脚本，不再包含“连续两章重复 warning 直接驳回”的规则。
 - `packages/core/src/agents/planner.ts`
-  - `current_focus.md` 刷新时会通过 `ignoreCurrentFocus` 模式重规划下一章目标，避免旧 focus 污染新一轮计划。
+  - 负责常规章节规划；但 `current_focus.md` 的自动刷新本身已经不再额外调用 planner。
 - `packages/core/src/pipeline/chapter-review-cycle.ts`
   - 控制“先审、失败则修、修后再审”的自动循环。
 - `packages/core/src/pipeline/revision-strategy.ts`
@@ -171,7 +175,9 @@ override 的持久化位置：
 - `packages/core/src/pipeline/chapter-persistence.ts`
   - chapter index 写入格式，以及 `ready-for-review` / `audit-failed` / `state-degraded` 三种落盘分流。
 - `packages/core/src/agents/title-refiner.ts`
-  - 章节标题专用复审与重命名 agent。会吃 `book_rules` 正文、章节内容和全量历史标题，强制避免“旧标题+补尾”的机械改名。
+  - 章节标题专用复审与重命名 agent。会吃 `book_rules` 正文、章节内容和全量历史标题，并额外感知“历史高频标题词压力”，强制避免“旧标题+补尾”的机械改名，以及长期复用“铜币 / 倒计时 / 门 / 钥匙”这类旧高频词壳。
+- `packages/core/src/agents/post-write-validator.ts`
+  - 本地零调用校验器。这里会把“正文里出现第X章/Chapter X 指称”直接视为 `critical` 级本地错误，并在审计前/落盘前强制进入 spot-fix。
 - `packages/core/src/pipeline/chapter-state-recovery.ts`
   - `state-degraded` 的降级保存与恢复元数据。
 - `packages/core/src/state/manager.ts`

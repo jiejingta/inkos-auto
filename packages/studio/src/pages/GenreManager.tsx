@@ -147,7 +147,7 @@ function GenreForm({
             checked={form.numericalSystem}
             onChange={(e) => set("numericalSystem", e.target.checked)}
           />
-          Numerical System
+          {t("genre.numericalSystem")}
         </label>
         <label className="flex items-center gap-2 text-sm">
           <input
@@ -155,7 +155,7 @@ function GenreForm({
             checked={form.powerScaling}
             onChange={(e) => set("powerScaling", e.target.checked)}
           />
-          Power Scaling
+          {t("genre.powerScaling")}
         </label>
         <label className="flex items-center gap-2 text-sm">
           <input
@@ -163,7 +163,7 @@ function GenreForm({
             checked={form.eraResearch}
             onChange={(e) => set("eraResearch", e.target.checked)}
           />
-          Era Research
+          {t("genre.eraResearch")}
         </label>
       </div>
 

@@ -140,7 +140,7 @@ describe("chatCompletion stream fallback", () => {
   });
 });
 
-describe("chatCompletion fixed-temperature clamp (thinking models)", () => {
+describe("chatCompletion temperature cap and retry handling", () => {
   beforeEach(() => {
     __resetFixedTemperatureWarnings();
   });
@@ -168,38 +168,40 @@ describe("chatCompletion fixed-temperature clamp (thinking models)", () => {
     usage: ZERO_USAGE,
   };
 
-  it("forces temperature=1 for kimi-k2.5 even when client default is 0.7", async () => {
+  it("caps any model temperature at the global 1.0 ceiling", async () => {
     const create = vi.fn().mockResolvedValue(OK_RESPONSE);
-    const client = makeSyncClient(create, 0.7);
+    const client = makeSyncClient(create, 1.2);
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 
-    await chatCompletion(client, "kimi-k2.5", [{ role: "user", content: "hi" }]);
+    await chatCompletion(client, "kimi-for-coding", [{ role: "user", content: "hi" }]);
 
     expect(create).toHaveBeenCalledTimes(1);
     expect(create.mock.calls[0]?.[0]).toMatchObject({ temperature: 1 });
     expect(warn).toHaveBeenCalledOnce();
-    expect(warn.mock.calls[0]?.[0]).toContain("kimi-k2.5");
+    expect(warn.mock.calls[0]?.[0]).toContain("全局上限为 1");
     warn.mockRestore();
   });
 
-  it("clamps per-call temperature override (0.3) to 1 for kimi-k2.5", async () => {
+  it("keeps temperatures unchanged when already within the global ceiling", async () => {
     const create = vi.fn().mockResolvedValue(OK_RESPONSE);
     const client = makeSyncClient(create, 0.7);
-    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 
     await chatCompletion(
       client,
       "kimi-k2.5",
       [{ role: "user", content: "hi" }],
-      { temperature: 0.3 },
+      { temperature: 0.9 },
     );
 
-    expect(create.mock.calls[0]?.[0]).toMatchObject({ temperature: 1 });
+    expect(create.mock.calls[0]?.[0]).toMatchObject({ temperature: 0.9 });
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
   });
 
   it("only warns once per model name across multiple calls", async () => {
     const create = vi.fn().mockResolvedValue(OK_RESPONSE);
-    const client = makeSyncClient(create, 0.7);
+    const client = makeSyncClient(create, 1.3);
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 
     await chatCompletion(client, "kimi-k2.5", [{ role: "user", content: "a" }]);
@@ -210,79 +212,27 @@ describe("chatCompletion fixed-temperature clamp (thinking models)", () => {
     warn.mockRestore();
   });
 
-  it("also clamps any model name containing 'thinking'", async () => {
+  it("retries transient upstream failures before surfacing an error", async () => {
     const create = vi.fn().mockResolvedValue(OK_RESPONSE);
-    const client = makeSyncClient(create, 0.5);
-    vi.spyOn(console, "warn").mockImplementation(() => {});
-
-    await chatCompletion(client, "kimi-thinking-preview", [
-      { role: "user", content: "hi" },
-    ]);
-
-    expect(create.mock.calls[0]?.[0]).toMatchObject({ temperature: 1 });
-  });
-
-  it("caps kimi-for-coding temperature to 1 when scheduler retry raises it above the API limit", async () => {
-    const create = vi.fn().mockResolvedValue(OK_RESPONSE);
+    create
+      .mockRejectedValueOnce(new Error("429 Too Many Requests"))
+      .mockRejectedValueOnce(new Error("529 Overloaded"))
+      .mockResolvedValueOnce(OK_RESPONSE);
     const client = makeSyncClient(create, 0.7);
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 
-    await chatCompletion(
-      client,
-      "kimi-for-coding",
-      [{ role: "user", content: "hi" }],
-      { temperature: 1.2 },
-    );
+    const result = await chatCompletion(client, "moonshot-v1-32k", [{ role: "user", content: "hi" }]);
 
-    expect(create.mock.calls[0]?.[0]).toMatchObject({ temperature: 1 });
-    expect(warn).toHaveBeenCalledOnce();
-    expect(warn.mock.calls[0]?.[0]).toContain("temperature 上限为 1");
-    warn.mockRestore();
+    expect(result.content).toBe("ok");
+    expect(create).toHaveBeenCalledTimes(3);
   });
 
-  it("keeps kimi-for-coding temperature unchanged when it is already within the API limit", async () => {
-    const create = vi.fn().mockResolvedValue(OK_RESPONSE);
+  it("does not retry generic 400 request errors", async () => {
+    const create = vi.fn().mockRejectedValue(new Error("400 Bad Request"));
     const client = makeSyncClient(create, 0.7);
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 
-    await chatCompletion(
-      client,
-      "kimi-for-coding",
-      [{ role: "user", content: "hi" }],
-      { temperature: 0.9 },
-    );
+    const error = await captureError(chatCompletion(client, "moonshot-v1-32k", [{ role: "user", content: "hi" }]));
 
-    expect(create.mock.calls[0]?.[0]).toMatchObject({ temperature: 0.9 });
-    expect(warn).not.toHaveBeenCalled();
-    warn.mockRestore();
-  });
-
-  it("leaves regular models untouched (no clamp, no warning)", async () => {
-    const create = vi.fn().mockResolvedValue(OK_RESPONSE);
-    const client = makeSyncClient(create, 0.7);
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-
-    await chatCompletion(
-      client,
-      "moonshot-v1-32k",
-      [{ role: "user", content: "hi" }],
-      { temperature: 0.3 },
-    );
-
-    expect(create.mock.calls[0]?.[0]).toMatchObject({ temperature: 0.3 });
-    expect(warn).not.toHaveBeenCalled();
-    warn.mockRestore();
-  });
-
-  it("does not warn when requested temperature is already 1", async () => {
-    const create = vi.fn().mockResolvedValue(OK_RESPONSE);
-    const client = makeSyncClient(create, 1);
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-
-    await chatCompletion(client, "kimi-k2.5", [{ role: "user", content: "hi" }]);
-
-    expect(create.mock.calls[0]?.[0]).toMatchObject({ temperature: 1 });
-    expect(warn).not.toHaveBeenCalled();
-    warn.mockRestore();
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(error.message).toContain("API 返回 400");
   });
 });

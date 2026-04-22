@@ -112,11 +112,11 @@ describe("Scheduler", () => {
 
     const success = await (
       scheduler as unknown as {
-        writeOneChapter: (bookId: string, bookConfig: BookConfig) => Promise<boolean>;
+        writeOneChapter: (bookId: string, bookConfig: BookConfig) => Promise<"approved" | "audit-failed" | "runtime-transient">;
       }
     ).writeOneChapter("book-1", bookConfig);
 
-    expect(success).toBe(false);
+    expect(success).toBe("audit-failed");
     expect(handleAuditFailure).toHaveBeenCalledWith("book-1", 3, ["state-validation"]);
     expect(onChapterComplete).toHaveBeenCalledWith("book-1", 3, "state-degraded");
   });
@@ -176,11 +176,11 @@ describe("Scheduler", () => {
 
     const success = await (
       scheduler as unknown as {
-        writeOneChapter: (bookId: string, bookConfig: BookConfig) => Promise<boolean>;
+        writeOneChapter: (bookId: string, bookConfig: BookConfig) => Promise<"approved" | "audit-failed" | "runtime-transient">;
       }
     ).writeOneChapter("book-1", bookConfig);
 
-    expect(success).toBe(true);
+    expect(success).toBe("approved");
     expect(loadChapterIndex).toHaveBeenCalledTimes(2);
     expect(saveChapterIndex).toHaveBeenCalledWith("book-1", [
       expect.objectContaining({
@@ -230,18 +230,20 @@ describe("Scheduler", () => {
       "writeNextChapter",
     ).mockRejectedValue(new Error("429 Too Many Requests"));
 
-    const success = await (
+    const outcome = await (
       scheduler as unknown as {
-        writeOneChapter: (bookId: string, bookConfig: BookConfig) => Promise<boolean>;
+        writeOneChapter: (bookId: string, bookConfig: BookConfig) => Promise<"approved" | "audit-failed" | "runtime-transient">;
       }
     ).writeOneChapter("book-1", bookConfig);
 
-    expect(success).toBe(false);
+    expect(outcome).toBe("runtime-transient");
     expect(logger.error).toHaveBeenCalledWith(expect.stringContaining("book-1 write attempt crashed: 429 Too Many Requests"));
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("transient runtime error"));
     expect(onError).toHaveBeenCalledWith(
       "book-1",
       expect.objectContaining({ message: "429 Too Many Requests" }),
     );
+    expect((scheduler as unknown as { consecutiveFailures: Map<string, number> }).consecutiveFailures.has("book-1")).toBe(false);
   });
 
   it("pauses immediately on non-retryable runtime authentication errors", async () => {
@@ -285,13 +287,13 @@ describe("Scheduler", () => {
       "writeNextChapter",
     ).mockRejectedValue(new Error("API 返回 401 (未授权)。请检查 .env 中的 INKOS_LLM_API_KEY 是否正确。"));
 
-    const success = await (
+    const outcome = await (
       scheduler as unknown as {
-        writeOneChapter: (bookId: string, bookConfig: BookConfig) => Promise<boolean>;
+        writeOneChapter: (bookId: string, bookConfig: BookConfig) => Promise<"approved" | "audit-failed" | "runtime-transient">;
       }
     ).writeOneChapter("book-1", bookConfig);
 
-    expect(success).toBe(false);
+    expect(outcome).toBe("audit-failed");
     expect(scheduler.isBookPaused("book-1")).toBe(true);
     expect(onPause).toHaveBeenCalledWith(
       "book-1",
@@ -326,7 +328,7 @@ describe("Scheduler", () => {
       consecutiveFailures: Map<string, number>;
       running: boolean;
       processBook: (bookId: string, bookConfig: BookConfig) => Promise<void>;
-      writeOneChapter: (bookId: string, bookConfig: BookConfig) => Promise<boolean>;
+      writeOneChapter: (bookId: string, bookConfig: BookConfig) => Promise<"approved" | "audit-failed" | "runtime-transient">;
     };
     const bookConfig: BookConfig = {
       id: "book-1",
@@ -343,7 +345,7 @@ describe("Scheduler", () => {
     const writeOneChapter = vi.spyOn(runtime, "writeOneChapter").mockImplementation(async () => {
       const failures = (runtime.consecutiveFailures.get("book-1") ?? 0) + 1;
       runtime.consecutiveFailures.set("book-1", failures);
-      return false;
+      return "audit-failed";
     });
 
     runtime.running = true;

@@ -9,7 +9,12 @@ import { ArchitectAgent, type ArchitectOutput } from "../agents/architect.js";
 import { FoundationReviewerAgent } from "../agents/foundation-reviewer.js";
 import { PlannerAgent, type PlanChapterOutput } from "../agents/planner.js";
 import { ComposerAgent } from "../agents/composer.js";
-import { WriterAgent, type WriteChapterInput, type WriteChapterOutput } from "../agents/writer.js";
+import {
+  WriterAgent,
+  stripLeadingChapterHeadings,
+  type WriteChapterInput,
+  type WriteChapterOutput,
+} from "../agents/writer.js";
 import { LengthNormalizerAgent } from "../agents/length-normalizer.js";
 import { ChapterAnalyzerAgent } from "../agents/chapter-analyzer.js";
 import { ContinuityAuditor, formatAuditIssue } from "../agents/continuity.js";
@@ -18,7 +23,7 @@ import { StateValidatorAgent, type ValidationResult, type ValidationWarning } fr
 import { TitleRefinerAgent } from "../agents/title-refiner.js";
 import { RadarAgent } from "../agents/radar.js";
 import type { RadarSource } from "../agents/radar-source.js";
-import { readGenreProfile } from "../agents/rules-reader.js";
+import { readBookRules, readGenreProfile } from "../agents/rules-reader.js";
 import { analyzeAITells } from "../agents/ai-tells.js";
 import { analyzeSensitiveWords } from "../agents/sensitive-words.js";
 import { StateManager } from "../state/manager.js";
@@ -33,7 +38,7 @@ import type { LengthSpec, LengthTelemetry } from "../models/length-governance.js
 import type { ContextPackage, RuleStack } from "../models/input-governance.js";
 import { buildLengthSpec, countChapterLength, formatLengthCount, isOutsideHardRange, isOutsideSoftRange, resolveLengthCountingMode, type LengthLanguage } from "../utils/length-metrics.js";
 import { analyzeLongSpanFatigue } from "../utils/long-span-fatigue.js";
-import { validateChapterTitle } from "../agents/post-write-validator.js";
+import { validateChapterTitle, validatePostWrite } from "../agents/post-write-validator.js";
 import { loadNarrativeMemorySeed, loadSnapshotCurrentStateFacts } from "../state/runtime-state-store.js";
 import { rewriteStructuredStateFromMarkdown } from "../state/state-bootstrap.js";
 import { renderChapterSummariesProjection } from "../state/state-projections.js";
@@ -659,6 +664,7 @@ export class PipelineRunner {
       };
       const normalizedDraft = await this.normalizeDraftLengthIfNeeded({
         bookId,
+        genre: book.genre,
         chapterNumber,
         chapterContent: output.content,
         lengthSpec,
@@ -695,10 +701,7 @@ export class PipelineRunner {
       const filePath = join(chaptersDir, filename);
 
       const resolvedLang = book.language ?? gp.language;
-      const heading = resolvedLang === "en"
-        ? `# Chapter ${chapterNumber}: ${draftOutput.title}`
-        : `# 第${chapterNumber}章 ${draftOutput.title}`;
-      await writeFile(filePath, `${heading}\n\n${draftOutput.content}`, "utf-8");
+      await writer.saveChapterManuscript(bookDir, draftOutput, resolvedLang);
 
       // Save truth files
       this.logStage(stageLanguage, { zh: "落盘草稿与真相文件", en: "persisting draft and truth files" });
@@ -977,6 +980,7 @@ export class PipelineRunner {
       }
       const normalizedRevision = await this.normalizeDraftLengthIfNeeded({
         bookId,
+        genre: book.genre,
         chapterNumber: targetChapter,
         chapterContent: reviseOutput.revisedContent,
         lengthSpec,
@@ -1547,6 +1551,7 @@ export class PipelineRunner {
       auditor,
       normalizeDraftLengthIfNeeded: (chapterContent) => this.normalizeDraftLengthIfNeeded({
         bookId,
+        genre: book.genre,
         chapterNumber,
         chapterContent,
         lengthSpec,
@@ -1568,6 +1573,25 @@ export class PipelineRunner {
     let auditResult = reviewResult.auditResult;
     const postReviseCount = reviewResult.postReviseCount;
     const normalizeApplied = reviewResult.normalizeApplied;
+
+    const localBodyGuard = await this.repairLocalBlockingBodyIssues({
+      bookId,
+      book,
+      bookDir,
+      chapterNumber,
+      chapterContent: finalContent,
+      chapterWordCount: finalWordCount,
+      auditResult,
+      auditor,
+      reducedControlInput,
+      lengthSpec,
+      language: pipelineLang,
+    });
+    totalUsage = PipelineRunner.addUsage(totalUsage, localBodyGuard.tokenUsage);
+    finalContent = localBodyGuard.content;
+    finalWordCount = localBodyGuard.wordCount;
+    revised = revised || localBodyGuard.revised;
+    auditResult = localBodyGuard.auditResult;
 
     // 4. Save the final chapter and truth files from a single persistence source
     const chapterIndexBeforePersist = await this.state.loadChapterIndex(bookId);
@@ -2598,22 +2622,20 @@ ${matrix}`;
   }
 
   private async refreshCurrentFocusAfterProgress(
-    book: BookConfig,
+    _book: BookConfig,
     bookDir: string,
     latestChapterNumber: number,
     language: LengthLanguage,
   ): Promise<void> {
     try {
-      const planner = new PlannerAgent(this.agentCtxFor("planner", book.id));
-      const plan = await planner.planChapter({
-        book,
-        bookDir,
-        chapterNumber: latestChapterNumber + 1,
-        ignoreCurrentFocus: true,
-      });
+      const nextPlan = await loadPersistedPlan(bookDir, latestChapterNumber + 1);
+      const latestPlan = nextPlan ?? await loadPersistedPlan(bookDir, latestChapterNumber);
+      const markdown = nextPlan
+        ? this.renderCurrentFocusMarkdown(nextPlan.intent, latestChapterNumber, language)
+        : this.renderLightweightCurrentFocusMarkdown(latestPlan?.intent, latestChapterNumber, language);
       await writeFile(
         join(bookDir, "story", "current_focus.md"),
-        this.renderCurrentFocusMarkdown(plan.intent, latestChapterNumber, language),
+        markdown,
         "utf-8",
       );
     } catch (error) {
@@ -2721,6 +2743,215 @@ ${matrix}`;
       cadenceLine || "延续既有节奏与标题风格，不要重新引用更早章节的临时改写任务。",
       "",
     ].join("\n");
+  }
+
+  private renderLightweightCurrentFocusMarkdown(
+    intent: PlanChapterOutput["intent"] | undefined,
+    latestChapterNumber: number,
+    language: LengthLanguage,
+  ): string {
+    const nextChapterNumber = latestChapterNumber + 1;
+    const goalLine = intent?.goal?.trim() || this.localize(language, {
+      zh: "根据最新 current_state.md、pending_hooks.md 与卷纲继续推进主线。",
+      en: "Continue from the latest current_state.md, pending_hooks.md, and outline.",
+    });
+    const outlineLine = intent?.outlineNode?.trim() || this.localize(language, {
+      zh: "沿用当前卷纲锚点，不要重新引用更早章节的临时修订任务。",
+      en: "Stay on the current outline anchor and do not resurrect stale rewrite tasks from earlier chapters.",
+    });
+    const avoidLine = intent?.mustAvoid.length
+      ? intent.mustAvoid.slice(0, 4).join(this.localize(language, { zh: "；", en: "; " }))
+      : this.localize(language, {
+          zh: "避免在正文中引用“第X章”、旧标题名或机械重复最近的标题高频词。",
+          en: "Avoid mentioning chapter numbers, old chapter titles, or mechanically repeating recent high-frequency title tokens.",
+        });
+
+    if (language === "en") {
+      return [
+        "# Current Focus",
+        "",
+        "> Auto-refreshed locally from the latest committed chapter to avoid extra model calls during autonomous mode.",
+        "",
+        "## Active Focus",
+        `Chapter ${nextChapterNumber} should prioritize: ${goalLine}`,
+        "",
+        "## Carry Forward",
+        `Latest committed chapter: ${latestChapterNumber}`,
+        "",
+        "## Outline Anchor",
+        outlineLine,
+        "",
+        "## Avoid",
+        avoidLine,
+        "",
+      ].join("\n");
+    }
+
+    return [
+      "# 当前聚焦",
+      "",
+      "> 本文件已根据最新落盘章节本地刷新，避免在守护写作中额外消耗一次规划调用。",
+      "",
+      "## 当前重点",
+      `第${nextChapterNumber}章应优先推进：${goalLine}`,
+      "",
+      "## 承接状态",
+      `最新已落盘章节：第${latestChapterNumber}章`,
+      "",
+      "## 卷纲锚点",
+      outlineLine,
+      "",
+      "## 避免事项",
+      avoidLine,
+      "",
+    ].join("\n");
+  }
+
+  private async repairLocalBlockingBodyIssues(params: {
+    readonly bookId: string;
+    readonly book: BookConfig;
+    readonly bookDir: string;
+    readonly chapterNumber: number;
+    readonly chapterContent: string;
+    readonly chapterWordCount: number;
+    readonly auditResult: AuditResult;
+    readonly auditor: ContinuityAuditor;
+    readonly reducedControlInput?: {
+      chapterIntent: string;
+      contextPackage: ContextPackage;
+      ruleStack: RuleStack;
+    };
+    readonly lengthSpec: LengthSpec;
+    readonly language: LengthLanguage;
+  }): Promise<{
+    readonly content: string;
+    readonly wordCount: number;
+    readonly revised: boolean;
+    readonly auditResult: AuditResult;
+    readonly tokenUsage?: TokenUsageSummary;
+  }> {
+    const [parsedRules, genreProfileResult] = await Promise.all([
+      readBookRules(params.bookDir),
+      this.loadGenreProfile(params.book.genre),
+    ]);
+    const genreProfile = genreProfileResult.profile;
+    const blockingViolations = validatePostWrite(
+      params.chapterContent,
+      genreProfile,
+      parsedRules?.rules ?? null,
+      params.language,
+    ).filter((violation) => violation.severity !== "warning");
+
+    if (blockingViolations.length === 0) {
+      return {
+        content: params.chapterContent,
+        wordCount: params.chapterWordCount,
+        revised: false,
+        auditResult: params.auditResult,
+      };
+    }
+
+    this.logWarn(params.language, {
+      zh: `最终正文仍有 ${blockingViolations.length} 个本地阻断错误，自动再做一次 spot-fix。`,
+      en: `${blockingViolations.length} blocking local body issues remain; running one final spot-fix.`,
+    });
+
+    const reviser = new ReviserAgent(this.agentCtxFor("reviser", params.bookId));
+    const reviseOutput = await reviser.reviseChapter(
+      params.bookDir,
+      params.chapterContent,
+      params.chapterNumber,
+      blockingViolations.map((violation) => ({
+        severity: "critical" as const,
+        category: violation.rule,
+        description: violation.description,
+        suggestion: violation.suggestion,
+      })),
+      "spot-fix",
+      params.book.genre,
+      {
+        ...params.reducedControlInput,
+        lengthSpec: params.lengthSpec,
+      },
+    );
+
+    let totalUsage = reviseOutput.tokenUsage;
+    let content = params.chapterContent;
+    let wordCount = params.chapterWordCount;
+    let revised = false;
+
+    if (reviseOutput.revisedContent.trim().length > 0) {
+      const normalized = await this.normalizeDraftLengthIfNeeded({
+        bookId: params.bookId,
+        genre: params.book.genre,
+        chapterNumber: params.chapterNumber,
+        chapterContent: reviseOutput.revisedContent,
+        lengthSpec: params.lengthSpec,
+        chapterIntent: params.reducedControlInput?.chapterIntent,
+      });
+      totalUsage = PipelineRunner.addUsage(
+        totalUsage ?? { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+        normalized.tokenUsage,
+      );
+      content = normalized.content;
+      wordCount = normalized.wordCount;
+      revised = true;
+    }
+
+    const postViolations = validatePostWrite(
+      content,
+      genreProfile,
+      parsedRules?.rules ?? null,
+      params.language,
+    ).filter((violation) => violation.severity !== "warning");
+
+    const reAudit = await params.auditor.auditChapter(
+      params.bookDir,
+      content,
+      params.chapterNumber,
+      params.book.genre,
+      params.reducedControlInput
+        ? { ...params.reducedControlInput, temperature: 0 }
+        : { temperature: 0 },
+    );
+    totalUsage = PipelineRunner.addUsage(
+      totalUsage ?? { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+      reAudit.tokenUsage,
+    );
+
+    const aiTellIssues = analyzeAITells(content, params.language).issues;
+    const sensitiveResult = analyzeSensitiveWords(content, undefined, params.language);
+    const hasBlockedWriteWords = sensitiveResult.found.some((item) => item.severity === "block");
+    let auditResult = this.restoreLostAuditIssues(params.auditResult, {
+      passed: !hasBlockedWriteWords && reAudit.passed && postViolations.length === 0,
+      issues: [
+        ...reAudit.issues,
+        ...aiTellIssues,
+        ...sensitiveResult.issues,
+        ...postViolations.map((violation) => ({
+          severity: "critical" as const,
+          category: violation.rule,
+          description: violation.description,
+          suggestion: violation.suggestion,
+        })),
+      ],
+      summary: reAudit.summary,
+    });
+
+    if (postViolations.length > 0) {
+      auditResult = {
+        ...auditResult,
+        passed: false,
+      };
+    }
+
+    return {
+      content,
+      wordCount,
+      revised,
+      auditResult,
+      tokenUsage: totalUsage,
+    };
   }
 
   private isLedgerPlaceholder(ledger: string): boolean {
@@ -3048,6 +3279,7 @@ ${matrix}`;
 
   private async normalizeDraftLengthIfNeeded(params: {
     bookId: string;
+    genre: string;
     chapterNumber: number;
     chapterContent: string;
     lengthSpec: LengthSpec;
@@ -3077,6 +3309,9 @@ ${matrix}`;
       chapterContent: params.chapterContent,
       lengthSpec: params.lengthSpec,
       chapterIntent: params.chapterIntent,
+      bookDir: this.state.bookDir(params.bookId),
+      genre: params.genre,
+      chapterNumber: params.chapterNumber,
     });
 
     // Safety net: if normalizer output is less than 25% of original, it was too destructive.
@@ -3871,13 +4106,14 @@ ${matrix}`;
     }
     const raw = await readFile(join(chaptersDir, chapterFile), "utf-8");
     const lines = raw.split("\n");
-    const title = this.parseChapterHeadingTitle(lines[0] ?? "", chapterNumber) ?? fallbackTitle ?? "";
-    const contentStart = lines.findIndex((line, index) => index > 0 && line.trim().length > 0);
+    const firstHeadingLine = lines.find((line) => line.trim().length > 0) ?? "";
+    const title = this.parseChapterHeadingTitle(firstHeadingLine, chapterNumber) ?? fallbackTitle ?? "";
+    const content = stripLeadingChapterHeadings(raw);
 
     return {
       fileName: chapterFile,
       title: title.trim(),
-      content: contentStart >= 0 ? lines.slice(contentStart).join("\n") : raw,
+      content,
       raw,
     };
   }
@@ -3889,10 +4125,14 @@ ${matrix}`;
     }
 
     const zh = new RegExp(`^#\\s*第\\s*${chapterNumber}\\s*章\\s+(.+)$`, "u");
+    const zhWords = /^#\s*第\s*[零〇一二三四五六七八九十百千万两\d]+\s*章\s*[:：]?\s*(.+)$/u;
+    const zhPlain = /^第\s*[零〇一二三四五六七八九十百千万两\d]+\s*章(?:\s+|[:：-])(.+)$/u;
     const en = new RegExp(`^#\\s*Chapter\\s+${chapterNumber}\\s*:\\s*(.+)$`, "iu");
     const generic = /^#\s+(.+)$/u;
 
     return line.match(zh)?.[1]?.trim()
+      ?? line.match(zhWords)?.[1]?.trim()
+      ?? line.match(zhPlain)?.[1]?.trim()
       ?? line.match(en)?.[1]?.trim()
       ?? line.match(generic)?.[1]?.trim()
       ?? undefined;

@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   evaluateEditorialAuditGate,
-  formatAuditIssue,
   type AuditIssue,
 } from "../agents/continuity.js";
 
@@ -41,38 +40,38 @@ describe("evaluateEditorialAuditGate", () => {
     ]);
   });
 
-  it("rejects three or more ordinary warnings", () => {
+  it("allows fewer than six ordinary warnings", () => {
     const decision = evaluateEditorialAuditGate({
       issues: [
         createIssue({ category: "Pacing Check" }),
         createIssue({ category: "Style Check", description: "prose is repetitive" }),
         createIssue({ category: "Dialogue Authenticity Check", description: "voices are too similar" }),
+        createIssue({ category: "Reader Expectation Check", description: "payoff lands a beat late" }),
+        createIssue({ category: "Arc Flatline Check", description: "arc movement is light" }),
+      ],
+      language: "en",
+    });
+
+    expect(decision.passed).toBe(true);
+    expect(decision.ordinaryWarningCount).toBe(5);
+  });
+
+  it("rejects six or more ordinary warnings", () => {
+    const decision = evaluateEditorialAuditGate({
+      issues: [
+        createIssue({ category: "Pacing Check" }),
+        createIssue({ category: "Style Check", description: "prose is repetitive" }),
+        createIssue({ category: "Dialogue Authenticity Check", description: "voices are too similar" }),
+        createIssue({ category: "Reader Expectation Check", description: "payoff lands a beat late" }),
+        createIssue({ category: "Arc Flatline Check", description: "arc movement is light" }),
+        createIssue({ category: "Pacing Monotony Check", description: "the pressure shape repeats" }),
       ],
       language: "en",
     });
 
     expect(decision.passed).toBe(false);
-    expect(decision.ordinaryWarningCount).toBe(3);
-  });
-
-  it("rejects repeated warning categories across consecutive chapters", () => {
-    const repeated = formatAuditIssue(createIssue({
-      category: "Pacing Check",
-      description: "recent chapters all end on the same beat",
-    }));
-    const decision = evaluateEditorialAuditGate({
-      issues: [createIssue({
-        category: "Pacing Check",
-        description: "this chapter repeats the same pacing problem",
-      })],
-      previousChapterAuditIssues: [repeated],
-      language: "en",
-    });
-
-    expect(decision.passed).toBe(false);
-    expect(decision.repeatedWarnings).toEqual([
-      "[warning] Pacing Check: this chapter repeats the same pacing problem",
-    ]);
+    expect(decision.ordinaryWarningCount).toBe(6);
+    expect(decision.rejectionReasons).toContain("contains 6 or more ordinary warnings");
   });
 
   it("approves info-only issues or a single light surface warning", () => {

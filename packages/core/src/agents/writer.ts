@@ -99,6 +99,39 @@ export interface WriteChapterOutput {
   readonly tokenUsage?: TokenUsage;
 }
 
+function isChapterHeadingLine(line: string): boolean {
+  const trimmed = line.trim();
+  return (
+    /^#\s+/.test(trimmed)
+    || /^第\s*[零〇一二三四五六七八九十百千万两\d]+\s*章(?:\s+|[:：-]).+$/u.test(trimmed)
+    || /^chapter\s+\d+(?:\s*[:：-]\s*.+)?$/iu.test(trimmed)
+  );
+}
+
+export function stripLeadingChapterHeadings(content: string): string {
+  const lines = content.replace(/^\uFEFF/u, "").split(/\r?\n/u);
+  let index = 0;
+
+  while (index < lines.length && lines[index]!.trim().length === 0) {
+    index += 1;
+  }
+
+  let removed = false;
+  while (index < lines.length && isChapterHeadingLine(lines[index]!)) {
+    removed = true;
+    index += 1;
+    while (index < lines.length && lines[index]!.trim().length === 0) {
+      index += 1;
+    }
+  }
+
+  if (!removed) {
+    return content.replace(/^\uFEFF/u, "");
+  }
+
+  return lines.slice(index).join("\n").trimStart();
+}
+
 export class WriterAgent extends BaseAgent {
   get name(): string {
     return "writer";
@@ -349,7 +382,7 @@ export class WriterAgent extends BaseAgent {
     ];
     const aiTellIssues = analyzeAITells(creative.content, resolvedLanguage).issues;
 
-    const postWriteErrors = ruleViolations.filter(v => v.severity === "error");
+    const postWriteErrors = ruleViolations.filter(v => v.severity === "error" || v.severity === "critical");
     const postWriteWarnings = ruleViolations.filter(v => v.severity === "warning");
 
     if (ruleViolations.length > 0) {
@@ -679,10 +712,11 @@ export class WriterAgent extends BaseAgent {
     const heading = language === "en"
       ? `# Chapter ${output.chapterNumber}: ${output.title}`
       : `# 第${output.chapterNumber}章 ${output.title}`;
+    const sanitizedContent = stripLeadingChapterHeadings(output.content);
     const chapterContent = [
       heading,
       "",
-      output.content,
+      sanitizedContent,
     ].join("\n");
 
     await writeFile(join(chaptersDir, filename), chapterContent, "utf-8");

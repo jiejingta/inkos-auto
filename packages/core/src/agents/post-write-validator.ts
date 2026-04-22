@@ -11,7 +11,7 @@ import type { GenreProfile } from "../models/genre-profile.js";
 
 export interface PostWriteViolation {
   readonly rule: string;
-  readonly severity: "error" | "warning";
+  readonly severity: "critical" | "error" | "warning";
   readonly description: string;
   readonly suggestion: string;
 }
@@ -195,7 +195,7 @@ export function validatePostWrite(
     const unique = [...new Set(chapterRefs)];
     violations.push({
       rule: isEnglish ? "chapter-number-reference" : "章节号指称",
-      severity: "error",
+      severity: "critical",
       description: isEnglish
         ? `Chapter text contains explicit chapter number references: ${unique.map(r => `"${r}"`).join(", ")}. Characters do not know they are in a numbered chapter.`
         : `正文中出现了章节号指称：${unique.map(r => `"${r}"`).join("、")}。角色不知道自己在第几章。`,
@@ -470,6 +470,18 @@ function validatePostWriteEnglish(
     }
   }
 
+  const chapterRefPattern = /\b(?:chapter\s+\d+)\b/gi;
+  const chapterRefs = content.match(chapterRefPattern);
+  if (chapterRefs && chapterRefs.length > 0) {
+    const unique = [...new Set(chapterRefs)];
+    violations.push({
+      rule: "chapter-number-reference",
+      severity: "critical",
+      description: `Chapter text contains explicit chapter number references: ${unique.map(r => `"${r}"`).join(", ")}. Characters do not know they are in a numbered chapter.`,
+      suggestion: "Replace with natural references such as 'that night', 'after the warehouse fire', or 'during the dock incident'.",
+    });
+  }
+
   // 4. Genre fatigue words
   const fatigueWords = bookRules?.fatigueWordsOverride && bookRules.fatigueWordsOverride.length > 0
     ? bookRules.fatigueWordsOverride
@@ -600,6 +612,99 @@ const TITLE_SHELL_PATCH_PATTERNS = [
   /\s+[ivx]+$/iu,
 ];
 
+export interface TitleHistoryPressureSummary {
+  readonly tokens: ReadonlyArray<string>;
+  readonly summary: string;
+}
+
+function extractTitleSignalTokens(title: string, language: "zh" | "en"): string[] {
+  if (language === "en") {
+    const words = title.match(/[A-Za-z]{4,}/g) ?? [];
+    return [...new Set(
+      words
+        .map((word) => word.toLowerCase())
+        .filter((word) => !ENGLISH_NAME_STOP_WORDS.has(word)),
+    )];
+  }
+
+  const normalized = title
+    .replace(/^第\s*[零〇一二三四五六七八九十百千万两\d]+\s*章[:：\s-]*/u, "")
+    .replace(/[：:，,。.!！？?·•]/gu, " ")
+    .replace(/[()（）【】\[\]<>《》]/gu, " ");
+  const rawSegments = normalized
+    .split(/[\s、/\\|]+/u)
+    .flatMap((segment) => segment.split(/[与和及并同跟对在于朝向从到之的里外前后上下]/u))
+    .map((segment) => segment.trim())
+    .filter((segment) => /[\u4e00-\u9fff]/u.test(segment))
+    .filter((segment) => segment.length >= 2);
+  const tokens = new Set<string>();
+
+  for (const segment of rawSegments) {
+    const clean = segment.replace(/^[零〇一二三四五六七八九十百千万两\d]+/u, "").trim();
+    if (clean.length >= 2 && clean.length <= 8) {
+      tokens.add(clean);
+    }
+    if (clean.length >= 4) {
+      for (let size = 2; size <= Math.min(4, clean.length); size += 1) {
+        tokens.add(clean.slice(clean.length - size));
+      }
+      for (let size = 2; size <= Math.min(4, clean.length); size += 1) {
+        for (let index = 0; index <= clean.length - size; index += 1) {
+          tokens.add(clean.slice(index, index + size));
+        }
+      }
+    }
+  }
+
+  return [...tokens];
+}
+
+function collectTitlePressure(existingTitles: ReadonlyArray<string>, language: "zh" | "en"): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const title of existingTitles) {
+    for (const token of extractTitleSignalTokens(title, language)) {
+      counts.set(token, (counts.get(token) ?? 0) + 1);
+    }
+  }
+  return counts;
+}
+
+export function summarizeTitleHistoryPressure(
+  existingTitles: ReadonlyArray<string>,
+  language: "zh" | "en" = "zh",
+): TitleHistoryPressureSummary | undefined {
+  if (existingTitles.length < 10) {
+    return undefined;
+  }
+
+  const counts = collectTitlePressure(existingTitles, language);
+  const threshold = Math.max(4, Math.ceil(existingTitles.length * 0.08));
+  const tokens = [...counts.entries()]
+    .filter(([, count]) => count >= threshold)
+    .sort((left, right) => right[1] - left[1] || right[0].length - left[0].length || left[0].localeCompare(right[0]))
+    .slice(0, 8);
+
+  if (tokens.length === 0) {
+    return undefined;
+  }
+
+  if (language === "en") {
+    return {
+      tokens: tokens.map(([token]) => token),
+      summary: `Historical title pressure is high around these overused tokens: ${tokens
+        .map(([token, count]) => `${token}×${count}`)
+        .join(", ")}.`,
+    };
+  }
+
+  return {
+    tokens: tokens.map(([token]) => token),
+    summary: `历史标题高频词压力集中在：${tokens
+      .map(([token, count]) => `${token}×${count}`)
+      .join("、")}。`,
+  };
+}
+
 /**
  * Detect duplicate or near-duplicate chapter titles.
  * Compares the new title against existing chapter titles from index.
@@ -668,17 +773,16 @@ function detectTitleCollapse(
   existingTitles: ReadonlyArray<string>,
   language: "zh" | "en",
 ): ReadonlyArray<PostWriteViolation> {
-  const recentTitles = existingTitles
+  const historyTitles = existingTitles
     .map((title) => title.trim())
     .filter(Boolean)
-    .slice(-12);
-  if (recentTitles.length < 4) {
+  if (historyTitles.length < 4) {
     return [];
   }
 
   const cadence = analyzeChapterCadence({
     language,
-    rows: [...recentTitles, newTitle].map((title, index) => ({
+    rows: [...historyTitles, newTitle].map((title, index) => ({
       chapter: index + 1,
       title,
       mood: "",
@@ -805,6 +909,62 @@ export function detectLowQualityTitle(
   return issues;
 }
 
+function detectOverusedTitleLexicon(
+  newTitle: string,
+  existingTitles: ReadonlyArray<string>,
+  language: "zh" | "en",
+): ReadonlyArray<PostWriteViolation> {
+  if (existingTitles.length < 10) {
+    return [];
+  }
+
+  const counts = collectTitlePressure(existingTitles, language);
+  const candidateTokens = extractTitleSignalTokens(newTitle, language);
+  if (candidateTokens.length === 0) {
+    return [];
+  }
+
+  const threshold = Math.max(4, Math.ceil(existingTitles.length * 0.08));
+  const repeatedTokens = candidateTokens
+    .map((token) => ({ token, count: counts.get(token) ?? 0 }))
+    .filter((entry) => entry.count >= threshold)
+    .sort((left, right) => right.count - left.count || right.token.length - left.token.length);
+
+  if (repeatedTokens.length === 0) {
+    return [];
+  }
+
+  const shouldWarn = repeatedTokens.length >= 2
+    || (
+      candidateTokens.length <= 2
+      && repeatedTokens.some((entry) => entry.count >= threshold + 2 && entry.token.length >= 3)
+    );
+  if (!shouldWarn) {
+    return [];
+  }
+
+  const summary = repeatedTokens
+    .slice(0, 4)
+    .map((entry) => `${entry.token}×${entry.count}`)
+    .join(language === "en" ? ", " : "、");
+
+  return [
+    language === "en"
+      ? {
+          rule: "title-lexical-overuse",
+          severity: "warning",
+          description: `Chapter title "${newTitle}" still leans on overused historical title words (${summary}).`,
+          suggestion: "Rename it around a fresher character, event, consequence, or image instead of recycling the old lexical shell.",
+        }
+      : {
+          rule: "title-lexical-overuse",
+          severity: "warning",
+          description: `章节标题"${newTitle}"仍在依赖历史高频旧词（${summary}）。`,
+          suggestion: "请改用更具体的人物、事件、后果或新意象命名，不要继续复用旧词壳。",
+        },
+  ];
+}
+
 export function validateChapterTitle(
   newTitle: string,
   existingTitles: ReadonlyArray<string>,
@@ -814,5 +974,6 @@ export function validateChapterTitle(
     ...detectDuplicateTitle(newTitle, existingTitles),
     ...detectTitleCollapse(newTitle, existingTitles, language),
     ...detectLowQualityTitle(newTitle, language, existingTitles),
+    ...detectOverusedTitleLexicon(newTitle, existingTitles, language),
   ];
 }

@@ -195,63 +195,26 @@ function stripReservedKeys(extra: Record<string, unknown>): Record<string, unkno
   return result;
 }
 
-// === Model Temperature Guard ===
-//
-// 部分 thinking 模型（如 Moonshot kimi-k2.5、kimi-thinking-preview）强制要求
-// temperature === 1，其他值会被 API 直接 400 拒绝。为让这类模型能和 inkos
-// 已有的 per-call 温度调参（0.1 validator → 0.8 architect brainstorm）共存，
-// 在 provider 层统一夹制：命中名单就把传入的 temperature 强制改成 1，并对
-// 每个模型名打一次 warning 提示用户。
-//
-// 另一些模型（如 kimi-for-coding）并不要求固定等于 1，但会拒绝任何 >1 的值。
-// 这类模型只做上限夹制，避免 scheduler 在连续失败时把温度抬过接口上限。
-
-function requiresFixedTemperature(model: string): boolean {
-  const lower = model.toLowerCase();
-  // kimi-k2.5 及其子变体（k2.5-preview 等），以及任何名字里带 "thinking" 的模型
-  return lower.startsWith("kimi-k2.5") || lower.includes("thinking");
-}
-
-function resolveModelTemperatureCap(model: string): number | null {
-  const lower = model.toLowerCase();
-  if (lower === "kimi-for-coding" || lower.startsWith("kimi-for-coding-")) {
-    return 1;
-  }
-  return null;
-}
-
-const warnedFixedTemperatureModels = new Set<string>();
-const warnedMaxTemperatureModels = new Set<string>();
+const GLOBAL_MAX_TEMPERATURE = 1;
+const warnedTemperatureCapModels = new Set<string>();
 
 function clampTemperatureForModel(model: string, requested: number): number {
-  if (requiresFixedTemperature(model)) {
-    if (requested === 1) return 1;
-    if (!warnedFixedTemperatureModels.has(model)) {
-      warnedFixedTemperatureModels.add(model);
+  const normalized = Math.max(0, requested);
+  if (normalized > GLOBAL_MAX_TEMPERATURE) {
+    if (!warnedTemperatureCapModels.has(model)) {
+      warnedTemperatureCapModels.add(model);
       console.warn(
-        `[inkos] 模型 "${model}" 是 thinking 模型，强制 temperature=1（原请求值 ${requested}）`,
+        `[inkos] 模型 "${model}" 的 temperature 全局上限为 ${GLOBAL_MAX_TEMPERATURE}，已将原请求值 ${requested} 夹制到 ${GLOBAL_MAX_TEMPERATURE}`,
       );
     }
-    return 1;
+    return GLOBAL_MAX_TEMPERATURE;
   }
-
-  const cap = resolveModelTemperatureCap(model);
-  if (cap !== null && requested > cap) {
-    if (!warnedMaxTemperatureModels.has(model)) {
-      warnedMaxTemperatureModels.add(model);
-      console.warn(
-        `[inkos] 模型 "${model}" 的 temperature 上限为 ${cap}，已将原请求值 ${requested} 夹制到 ${cap}`,
-      );
-    }
-    return cap;
-  }
-  return requested;
+  return normalized;
 }
 
 // 仅测试用：清空 warning 去重集合。
 export function __resetFixedTemperatureWarnings(): void {
-  warnedFixedTemperatureModels.clear();
-  warnedMaxTemperatureModels.clear();
+  warnedTemperatureCapModels.clear();
 }
 
 // === Error Wrapping ===
@@ -295,6 +258,11 @@ function wrapLLMError(error: unknown, context?: { readonly baseUrl?: string; rea
       `API 返回 429 (请求过多)。请稍后重试，或检查 API 配额。${ctxLine}`,
     );
   }
+  if (msg.includes("529")) {
+    return new Error(
+      `API 返回 529 (上游服务过载)。请稍后重试。${ctxLine}`,
+    );
+  }
   if (msg.includes("Connection error") || msg.includes("ECONNREFUSED") || msg.includes("ENOTFOUND") || msg.includes("fetch failed")) {
     return new Error(
       `无法连接到 API 服务。可能原因：\n` +
@@ -305,6 +273,48 @@ function wrapLLMError(error: unknown, context?: { readonly baseUrl?: string; rea
     );
   }
   return error instanceof Error ? error : new Error(msg);
+}
+
+function isRetryableUpstreamError(error: unknown): boolean {
+  const msg = String(error).toLowerCase();
+  return (
+    msg.includes("429")
+    || msg.includes("529")
+    || msg.includes("502")
+    || msg.includes("503")
+    || msg.includes("504")
+    || msg.includes("rate limit")
+    || msg.includes("overloaded")
+    || msg.includes("timeout")
+    || msg.includes("timed out")
+    || msg.includes("econnreset")
+    || msg.includes("socket hang up")
+    || msg.includes("fetch failed")
+  );
+}
+
+async function withRetryableLLMRequest<T>(
+  task: () => Promise<T>,
+  maxAttempts: number = 3,
+): Promise<T> {
+  let attempt = 0;
+  let lastError: unknown;
+
+  while (attempt < maxAttempts) {
+    attempt += 1;
+    try {
+      return await task();
+    } catch (error) {
+      lastError = error;
+      if (attempt >= maxAttempts || !isRetryableUpstreamError(error)) {
+        throw error;
+      }
+      const delayMs = 800 * 2 ** (attempt - 1);
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 
 function wrapStreamRequiredError(
@@ -352,50 +362,56 @@ export async function chatCompletion(
   const onTextDelta = options?.onTextDelta;
   const errorCtx = { baseUrl: client.baseUrl ?? client._openai?.baseURL ?? "(anthropic)", model };
 
-  try {
-    if (client.provider === "anthropic") {
+  const runAttempt = async (): Promise<LLMResponse> => {
+    try {
+      if (client.provider === "anthropic") {
+        return client.stream
+          ? await chatCompletionAnthropic(client._anthropic!, model, messages, resolved, client.defaults.thinkingBudget, onStreamProgress, onTextDelta)
+          : await chatCompletionAnthropicSync(client._anthropic!, model, messages, resolved, client.defaults.thinkingBudget, onTextDelta);
+      }
+      if (client.apiFormat === "responses") {
+        return client.stream
+          ? await chatCompletionOpenAIResponses(client._openai!, model, messages, resolved, options?.webSearch, onStreamProgress, onTextDelta)
+          : await chatCompletionOpenAIResponsesSync(client._openai!, model, messages, resolved, options?.webSearch, onTextDelta);
+      }
       return client.stream
-        ? await chatCompletionAnthropic(client._anthropic!, model, messages, resolved, client.defaults.thinkingBudget, onStreamProgress, onTextDelta)
-        : await chatCompletionAnthropicSync(client._anthropic!, model, messages, resolved, client.defaults.thinkingBudget, onTextDelta);
-    }
-    if (client.apiFormat === "responses") {
-      return client.stream
-        ? await chatCompletionOpenAIResponses(client._openai!, model, messages, resolved, options?.webSearch, onStreamProgress, onTextDelta)
-        : await chatCompletionOpenAIResponsesSync(client._openai!, model, messages, resolved, options?.webSearch, onTextDelta);
-    }
-    return client.stream
-      ? await chatCompletionOpenAIChat(client._openai!, model, messages, resolved, options?.webSearch, onStreamProgress, onTextDelta)
-      : await chatCompletionOpenAIChatSync(client._openai!, model, messages, resolved, options?.webSearch, onTextDelta);
-  } catch (error) {
-    // Stream interrupted but partial content is usable — return truncated response
-    if (error instanceof PartialResponseError) {
-      return {
-        content: error.partialContent,
-        usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
-      };
-    }
+        ? await chatCompletionOpenAIChat(client._openai!, model, messages, resolved, options?.webSearch, onStreamProgress, onTextDelta)
+        : await chatCompletionOpenAIChatSync(client._openai!, model, messages, resolved, options?.webSearch, onTextDelta);
+    } catch (error) {
+      if (error instanceof PartialResponseError) {
+        return {
+          content: error.partialContent,
+          usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+        };
+      }
 
-    // Auto-fallback: if streaming failed, retry with sync (many proxies don't support SSE)
-    if (client.stream) {
-      const isStreamRelated = isLikelyStreamError(error);
-      if (isStreamRelated) {
-        try {
-          if (client.provider === "anthropic") {
-            return await chatCompletionAnthropicSync(client._anthropic!, model, messages, resolved, client.defaults.thinkingBudget);
+      if (client.stream) {
+        const isStreamRelated = isLikelyStreamError(error);
+        if (isStreamRelated) {
+          try {
+            if (client.provider === "anthropic") {
+              return await chatCompletionAnthropicSync(client._anthropic!, model, messages, resolved, client.defaults.thinkingBudget);
+            }
+            if (client.apiFormat === "responses") {
+              return await chatCompletionOpenAIResponsesSync(client._openai!, model, messages, resolved, options?.webSearch);
+            }
+            return await chatCompletionOpenAIChatSync(client._openai!, model, messages, resolved, options?.webSearch);
+          } catch (syncError) {
+            if (isStreamRequiredError(syncError)) {
+              throw wrapStreamRequiredError(error, syncError, errorCtx);
+            }
+            throw syncError;
           }
-          if (client.apiFormat === "responses") {
-            return await chatCompletionOpenAIResponsesSync(client._openai!, model, messages, resolved, options?.webSearch);
-          }
-          return await chatCompletionOpenAIChatSync(client._openai!, model, messages, resolved, options?.webSearch);
-        } catch (syncError) {
-          if (isStreamRequiredError(syncError)) {
-            throw wrapStreamRequiredError(error, syncError, errorCtx);
-          }
-          throw wrapLLMError(syncError, errorCtx);
         }
       }
-    }
 
+      throw error;
+    }
+  };
+
+  try {
+    return await withRetryableLLMRequest(runAttempt);
+  } catch (error) {
     throw wrapLLMError(error, errorCtx);
   }
 }
@@ -439,24 +455,25 @@ export async function chatWithTools(
     readonly maxTokens?: number;
   },
 ): Promise<ChatWithToolsResult> {
+  const resolved = {
+    temperature: clampTemperatureForModel(
+      model,
+      options?.temperature ?? client.defaults.temperature,
+    ),
+    maxTokens: options?.maxTokens ?? client.defaults.maxTokens,
+  };
   try {
-    const resolved = {
-      temperature: clampTemperatureForModel(
-        model,
-        options?.temperature ?? client.defaults.temperature,
-      ),
-      maxTokens: options?.maxTokens ?? client.defaults.maxTokens,
-    };
-    // Tool-calling always uses streaming (only used by agent loop, not by writer/auditor)
-    if (client.provider === "anthropic") {
-      return await chatWithToolsAnthropic(client._anthropic!, model, messages, tools, resolved, client.defaults.thinkingBudget);
-    }
-    if (client.apiFormat === "responses") {
-      return await chatWithToolsOpenAIResponses(client._openai!, model, messages, tools, resolved);
-    }
-    return await chatWithToolsOpenAIChat(client._openai!, model, messages, tools, resolved);
+    return await withRetryableLLMRequest(async () => {
+      if (client.provider === "anthropic") {
+        return await chatWithToolsAnthropic(client._anthropic!, model, messages, tools, resolved, client.defaults.thinkingBudget);
+      }
+      if (client.apiFormat === "responses") {
+        return await chatWithToolsOpenAIResponses(client._openai!, model, messages, tools, resolved);
+      }
+      return await chatWithToolsOpenAIChat(client._openai!, model, messages, tools, resolved);
+    });
   } catch (error) {
-    throw wrapLLMError(error);
+    throw wrapLLMError(error, { baseUrl: client.baseUrl ?? client._openai?.baseURL ?? "(anthropic)", model });
   }
 }
 

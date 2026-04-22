@@ -5,6 +5,7 @@ import {
   detectParagraphLengthDrift,
   detectParagraphShapeWarnings,
   resolveDuplicateTitle,
+  summarizeTitleHistoryPressure,
   validateChapterTitle,
   validatePostWrite,
   type PostWriteViolation,
@@ -178,6 +179,14 @@ describe("validatePostWrite", () => {
     expect(findRule(result, "本书禁忌")).toBeDefined();
   });
 
+  it("treats chapter number references as critical local violations", () => {
+    const content = "第189章的夜谈结束后，他才意识到门外一直有人。";
+    const result = validatePostWrite(content, baseProfile, null);
+    const violation = findRule(result, "章节号指称");
+    expect(violation).toBeDefined();
+    expect(violation?.severity).toBe("critical");
+  });
+
   it("does not flag allowed content", () => {
     // Content that is clean across all rules
     const content = `他站起来，环顾四周。窗外的月光洒在地板上，像一层薄薄的霜。\n\n\u201c走吧。\u201d她转身推开门。冷风从缝隙里钻进来，她裹紧了衣服。`;
@@ -269,5 +278,44 @@ describe("validatePostWrite", () => {
     );
 
     expect(result.some((issue) => issue.rule === "title-shell-patch" || issue.rule === "title-placeholder")).toBe(true);
+  });
+
+  it("flags titles that keep leaning on historical high-frequency lexical shells", () => {
+    const history = [
+      "女神的欠条与三枚铜币",
+      "倒计时后的铜币裂纹",
+      "三百年倒计时与门后的铜币",
+      "门与铜币的倒计时",
+      "钥匙、铜币与第三次倒计时",
+      "三百年的门与铜币名单",
+      "倒计时、钥匙与铜币回响",
+      "门后的三百年倒计时",
+      "铜币与第七把钥匙",
+      "倒计时尽头的铜币门",
+      "三百年与铜币的回声",
+      "门后的钥匙与铜币",
+    ];
+
+    const result = validateChapterTitle("三百年倒计时与铜币门", history, "zh");
+
+    expect(result.some((issue) => issue.rule === "title-lexical-overuse")).toBe(true);
+  });
+
+  it("summarizes historical title pressure for prompt feedback", () => {
+    const summary = summarizeTitleHistoryPressure([
+      "女神的欠条与三枚铜币",
+      "倒计时后的铜币裂纹",
+      "三百年倒计时与门后的铜币",
+      "门与铜币的倒计时",
+      "钥匙、铜币与第三次倒计时",
+      "三百年的门与铜币名单",
+      "倒计时、钥匙与铜币回响",
+      "门后的三百年倒计时",
+      "铜币与第七把钥匙",
+      "倒计时尽头的铜币门",
+    ], "zh");
+
+    expect(summary?.summary).toContain("铜币");
+    expect(summary?.tokens.length).toBeGreaterThan(0);
   });
 });

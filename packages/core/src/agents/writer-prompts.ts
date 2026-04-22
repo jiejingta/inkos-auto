@@ -12,6 +12,18 @@ export interface FanficContext {
   readonly allowedDeviations: ReadonlyArray<string>;
 }
 
+export interface WriterGlobalRulesPromptInput {
+  readonly genreProfile: GenreProfile;
+  readonly bookRules: BookRules | null;
+  readonly bookRulesBody: string;
+  readonly genreBody: string;
+  readonly styleGuide: string;
+  readonly chapterNumber?: number;
+  readonly languageOverride?: "zh" | "en";
+  readonly inputProfile?: "legacy" | "governed";
+  readonly lengthSpec: LengthSpec;
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -81,6 +93,54 @@ export function buildWriterSystemPrompt(
         fanficContext ? buildFanficModeInstructions(fanficContext.fanficMode, fanficContext.allowedDeviations) : "",
         !governed ? buildPreWriteChecklist(book, genreProfile) : "",
         outputSection,
+      ];
+
+  return sections.filter(Boolean).join("\n\n");
+}
+
+export function buildWriterGlobalRulesPrompt(input: WriterGlobalRulesPromptInput): string {
+  const isEnglish = (input.languageOverride ?? input.genreProfile.language) === "en";
+  const governed = (input.inputProfile ?? "legacy") === "governed";
+  const englishBookStub = {
+    id: "writer-rules",
+    title: "Writer Rules",
+    platform: "tomato",
+    genre: input.genreProfile.id,
+    status: "active",
+    targetChapters: 1,
+    chapterWordCount: input.lengthSpec.target,
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+  } satisfies BookConfig;
+
+  const sections = isEnglish
+    ? [
+        buildEnglishCoreRules(englishBookStub),
+        buildGovernedInputContract("en", governed),
+        buildLengthGuidance(input.lengthSpec, "en"),
+        !governed ? buildEnglishAntiAIRules() : "",
+        !governed ? buildEnglishCharacterMethod() : "",
+        buildGenreRules(input.genreProfile, input.genreBody),
+        buildProtagonistRules(input.bookRules),
+        buildBookRulesBody(input.bookRulesBody),
+        buildStyleGuide(input.styleGuide),
+      ]
+    : [
+        buildCoreRules(input.lengthSpec),
+        buildGovernedInputContract("zh", governed),
+        buildLengthGuidance(input.lengthSpec, "zh"),
+        !governed ? buildAntiAIExamples() : "",
+        !governed ? buildCharacterPsychologyMethod() : "",
+        !governed ? buildSupportingCharacterMethod() : "",
+        !governed ? buildReaderPsychologyMethod() : "",
+        !governed ? buildEmotionalPacingMethod() : "",
+        !governed ? buildImmersionTechniques() : "",
+        !governed ? buildGoldenChaptersRules(input.chapterNumber) : "",
+        input.bookRules?.enableFullCastTracking ? buildFullCastTracking() : "",
+        buildGenreRules(input.genreProfile, input.genreBody),
+        buildProtagonistRules(input.bookRules),
+        buildBookRulesBody(input.bookRulesBody),
+        buildStyleGuide(input.styleGuide),
       ];
 
   return sections.filter(Boolean).join("\n\n");

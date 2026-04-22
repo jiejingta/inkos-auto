@@ -14,6 +14,8 @@ import {
   mergeTableMarkdownByKey,
 } from "../utils/governed-working-set.js";
 import { applySpotFixPatches, parseSpotFixPatches } from "../utils/spot-fix-patches.js";
+import { buildLengthSpec } from "../utils/length-metrics.js";
+import { buildWriterGlobalRulesPrompt } from "./writer-prompts.js";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -88,7 +90,7 @@ export class ReviserAgent extends BaseAgent {
 
     // Load genre profile and book rules
     const genreId = genre ?? "other";
-    const [{ profile: gp }, bookLanguage] = await Promise.all([
+    const [{ profile: gp, body: genreBody }, bookLanguage] = await Promise.all([
       readGenreProfile(this.ctx.projectRoot, genreId),
       readBookLanguage(bookDir),
     ]);
@@ -117,6 +119,7 @@ export class ReviserAgent extends BaseAgent {
 
     const isEnglish = (bookLanguage ?? gp.language) === "en";
     const resolvedLanguage = isEnglish ? "en" : "zh";
+    const effectiveLengthSpec = options?.lengthSpec ?? buildLengthSpec(3000, resolvedLanguage);
     const langPrefix = isEnglish
       ? mode === "spot-fix"
         ? `【LANGUAGE OVERRIDE】ALL output (FIXED_ISSUES, PATCHES, UPDATED_STATE, UPDATED_HOOKS) MUST be in English. Every TARGET_TEXT and REPLACEMENT_TEXT must be written entirely in English.\n\n`
@@ -172,6 +175,17 @@ ${gp.numericalSystem ? "\n=== UPDATED_LEDGER ===\n(更新后的完整资源账�
 ${gp.numericalSystem ? "\n=== UPDATED_LEDGER ===\n(更新后的完整资源账本)" : ""}
 === UPDATED_HOOKS ===
 (更新后的完整伏笔池)`;
+    const globalWritingRules = buildWriterGlobalRulesPrompt({
+      genreProfile: gp,
+      bookRules,
+      bookRulesBody: parsedRules?.body ?? "",
+      genreBody,
+      styleGuide,
+      chapterNumber,
+      languageOverride: resolvedLanguage,
+      inputProfile: governedMode ? "governed" : "legacy",
+      lengthSpec: effectiveLengthSpec,
+    });
 
     const systemPrompt = `${langPrefix}你是一位专业的${gp.name}网络小说修稿编辑。你的任务是根据审稿意见对章节进行修正。${protagonistBlock}
 
@@ -189,7 +203,10 @@ ${mode === "spot-fix" ? "\n9. spot-fix 只能输出局部补丁，禁止输出�
 
 输出格式：
 
-${outputFormat}`;
+${outputFormat}
+
+## 全局写作规则
+${globalWritingRules}`;
 
     const ledgerBlock = gp.numericalSystem
       ? `\n## 资源账本\n${ledger}`

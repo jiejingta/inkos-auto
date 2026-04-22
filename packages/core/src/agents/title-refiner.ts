@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { BaseAgent } from "./base.js";
 import { readBookLanguage, readBookRules, readGenreProfile } from "./rules-reader.js";
+import { summarizeTitleHistoryPressure } from "./post-write-validator.js";
 
 export interface RefineChapterTitleOutput {
   readonly title: string;
@@ -45,6 +46,12 @@ export class TitleRefinerAgent extends BaseAgent {
         .map((title, index) => `${index + 1}. ${title}`)
         .join("\n")
       : (isEnglish ? "(no previous titles)" : "(暂无历史标题)");
+    const historyPressure = summarizeTitleHistoryPressure(params.existingTitles, isEnglish ? "en" : "zh");
+    const historyPressureBlock = historyPressure
+      ? (isEnglish
+        ? `\n## Historical Lexical Pressure\n${historyPressure.summary}\nAvoid leaning on these repeated words unless the chapter truly cannot be titled well without them.\n`
+        : `\n## 历史词汇压力\n${historyPressure.summary}\n除非本章确实离不开这些词，否则不要再拿它们当标题主骨架。\n`)
+      : "";
     const modeInstruction = params.mode === "retitle"
       ? (isEnglish
         ? "This is a batch retitling pass over an existing serial. If the current title is weak, repetitive, placeholder-like, or off-style, replace it decisively."
@@ -67,8 +74,9 @@ Rules:
 2. Do not mechanically patch the current title by appending a colon suffix, bracket suffix, serial number, or filler phrase just to dodge duplication.
 3. If the current title is weak, repetitive, too vague, placeholder-like, or off-style, replace the whole title.
 4. Prefer titles that reflect the chapter's real conflict, event, consequence, or image.
-5. Avoid exact duplicates, near-duplicates, and recycled title shells from title history.
-6. Output only the final title, not the chapter number.
+5. Avoid exact duplicates, near-duplicates, recycled title shells, and historical high-frequency title words from title history.
+6. Prefer concrete people, relationships, events, consequences, or scene images over vague mythic props or recycled symbolic nouns.
+7. Output only the final title, not the chapter number.
 
 Return exactly:
 === FINAL_TITLE ===
@@ -85,8 +93,9 @@ Return exactly:
 2. 禁止为了规避重复，在原标题后机械追加冒号后缀、括号后缀、序号或凑数词。
 3. 如果当前标题偏弱、重复、过虚、像占位符，或明显偏离本书风格，必须整体重起。
 4. 标题优先体现本章真实的冲突、事件、后果或意象。
-5. 避免与历史标题 exact duplicate、near duplicate，或继续复用同一命名壳。
-6. 输出只写最终标题，不要带“第X章”。
+5. 避免与历史标题 exact duplicate、near duplicate，避免继续复用同一命名壳，也避免继续依赖历史高频旧词。
+6. 尽量优先用具体的人物、关系、事件、后果、场景意象，不要只靠神秘道具词、抽象意象词、老高频词支撑标题。
+7. 输出只写最终标题，不要带“第X章”。
 
 严格按下面格式输出：
 === FINAL_TITLE ===
@@ -103,6 +112,7 @@ ${params.currentTitle}
 
 ## Historical Title List
 ${historyBlock}
+${historyPressureBlock}
 
 ## Book Rules / Style Guide
 ${styleGuide}

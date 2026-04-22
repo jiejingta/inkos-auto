@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { WriterAgent } from "../agents/writer.js";
+import { WriterAgent, stripLeadingChapterHeadings } from "../agents/writer.js";
 import { buildLengthSpec } from "../utils/length-metrics.js";
 
 const ZERO_USAGE = {
@@ -1223,5 +1223,62 @@ describe("WriterAgent", () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+  });
+
+  it("strips duplicated leading chapter headings before saving manuscripts", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-writer-heading-"));
+    const bookDir = join(root, "book");
+    const agent = new WriterAgent({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0,
+          maxTokensCap: null,
+          extra: {},
+        },
+      },
+      model: "test-model",
+      projectRoot: root,
+    });
+
+    try {
+      await agent.saveChapterManuscript(
+        bookDir,
+        {
+          chapterNumber: 190,
+          title: "精灵档案馆与七人名单",
+          content: [
+            "# 第一百九十章：精灵档案馆与第七封印的另一条路",
+            "",
+            "第189章的夜谈结束时，窗外已经泛起鱼肚白。",
+          ].join("\n"),
+        },
+        "zh",
+      );
+
+      const raw = await readFile(join(bookDir, "chapters", "0190_精灵档案馆与七人名单.md"), "utf-8");
+      expect(raw.startsWith("# 第190章 精灵档案馆与七人名单\n\n# 第一百九十章")).toBe(false);
+      expect(raw).toContain("# 第190章 精灵档案馆与七人名单");
+      expect(raw).toContain("第189章的夜谈结束时");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("can strip stacked heading residue from an existing chapter body", () => {
+    const content = [
+      "",
+      "# 第190章 精灵档案馆与七人名单",
+      "",
+      "# 第一百九十章：精灵档案馆与第七封印的另一条路",
+      "",
+      "正文开始。",
+    ].join("\n");
+
+    expect(stripLeadingChapterHeadings(content)).toBe("正文开始。");
   });
 });

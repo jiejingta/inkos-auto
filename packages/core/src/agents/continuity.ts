@@ -33,13 +33,10 @@ type PromptLanguage = "zh" | "en";
 export interface EditorialAuditGateDecision {
   readonly passed: boolean;
   readonly rejectionReasons: ReadonlyArray<string>;
-  readonly repeatedWarnings: ReadonlyArray<string>;
   readonly statePollutingWarnings: ReadonlyArray<string>;
   readonly ordinaryWarningCount: number;
 }
 
-const ISSUE_PREFIX_PATTERN = /^\[(critical|warning|info)\]\s*/iu;
-const ISSUE_SPLIT_PATTERN = /^\[(critical|warning|info)\]\s*(?:(.+?)[：:]\s*)?(.*)$/iu;
 const STATE_POLLUTION_WARNING_PATTERNS = [
   /timeline|chronolog|chronicle drift|时间线|时序/u,
   /lore|canon|setting|world rule|设定|正史|世界规则/u,
@@ -60,44 +57,6 @@ export function formatAuditIssue(issue: Pick<AuditIssue, "severity" | "category"
   return `[${issue.severity}] ${category}: ${description}`;
 }
 
-function normalizeIssueLabel(text: string): string {
-  return text
-    .toLowerCase()
-    .replace(ISSUE_PREFIX_PATTERN, "")
-    .replace(/chapter\s+\d+/gu, " ")
-    .replace(/第\s*\d+\s*章/gu, " ")
-    .replace(/[^\p{L}\p{N}]+/gu, " ")
-    .trim();
-}
-
-function buildWarningSignature(issue: Pick<AuditIssue, "category" | "description">): string {
-  const normalizedCategory = normalizeIssueLabel(issue.category);
-  if (normalizedCategory.length > 0) {
-    return normalizedCategory;
-  }
-  return normalizeIssueLabel(issue.description);
-}
-
-function parsePersistedAuditIssue(issue: string): {
-  readonly severity?: AuditIssue["severity"];
-  readonly category: string;
-  readonly description: string;
-} {
-  const match = issue.match(ISSUE_SPLIT_PATTERN);
-  if (!match) {
-    return {
-      category: "",
-      description: issue.trim(),
-    };
-  }
-
-  return {
-    severity: match[1] as AuditIssue["severity"],
-    category: (match[2] ?? "").trim(),
-    description: (match[3] ?? "").trim(),
-  };
-}
-
 function isStatePollutingWarning(issue: AuditIssue): boolean {
   if (issue.severity !== "warning") {
     return false;
@@ -107,7 +66,7 @@ function isStatePollutingWarning(issue: AuditIssue): boolean {
   return STATE_POLLUTION_WARNING_PATTERNS.some((pattern) => pattern.test(haystack));
 }
 
-function localizeGateMessage(language: PromptLanguage, key: "critical" | "state" | "warning-count" | "repeated"): string {
+function localizeGateMessage(language: PromptLanguage, key: "critical" | "state" | "warning-count"): string {
   if (language === "en") {
     switch (key) {
       case "critical":
@@ -115,9 +74,7 @@ function localizeGateMessage(language: PromptLanguage, key: "critical" | "state"
       case "state":
         return "contains warnings that would pollute long-term story state";
       case "warning-count":
-        return "contains 3 or more ordinary warnings";
-      case "repeated":
-        return "repeats the same warning category across consecutive chapters";
+        return "contains 6 or more ordinary warnings";
     }
   }
 
@@ -127,32 +84,18 @@ function localizeGateMessage(language: PromptLanguage, key: "critical" | "state"
     case "state":
       return "存在会污染长期故事状态的 warning";
     case "warning-count":
-      return "存在 3 个或以上普通 warning";
-    case "repeated":
-      return "相同 warning 在连续章节中重复出现";
+      return "存在 6 个或以上普通 warning";
   }
 }
 
 export function evaluateEditorialAuditGate(params: {
   readonly issues: ReadonlyArray<AuditIssue>;
-  readonly previousChapterAuditIssues?: ReadonlyArray<string>;
   readonly language?: PromptLanguage;
 }): EditorialAuditGateDecision {
   const language = params.language ?? "zh";
   const criticalIssues = params.issues.filter((issue) => issue.severity === "critical");
   const warningIssues = params.issues.filter((issue) => issue.severity === "warning");
   const statePollutingWarnings = warningIssues.filter(isStatePollutingWarning);
-  const previousWarningSignatures = new Set(
-    (params.previousChapterAuditIssues ?? [])
-      .map(parsePersistedAuditIssue)
-      .filter((issue) => issue.severity === "warning")
-      .map((issue) => buildWarningSignature(issue))
-      .filter((signature) => signature.length > 0),
-  );
-  const repeatedWarnings = warningIssues.filter((issue) => {
-    const signature = buildWarningSignature(issue);
-    return signature.length > 0 && previousWarningSignatures.has(signature);
-  });
   const ordinaryWarnings = warningIssues.filter((issue) => !isStatePollutingWarning(issue));
 
   const rejectionReasons: string[] = [];
@@ -162,17 +105,13 @@ export function evaluateEditorialAuditGate(params: {
   if (statePollutingWarnings.length > 0) {
     rejectionReasons.push(localizeGateMessage(language, "state"));
   }
-  if (ordinaryWarnings.length >= 3) {
+  if (ordinaryWarnings.length >= 6) {
     rejectionReasons.push(localizeGateMessage(language, "warning-count"));
-  }
-  if (repeatedWarnings.length > 0) {
-    rejectionReasons.push(localizeGateMessage(language, "repeated"));
   }
 
   return {
     passed: rejectionReasons.length === 0,
     rejectionReasons,
-    repeatedWarnings: repeatedWarnings.map((issue) => formatAuditIssue(issue)),
     statePollutingWarnings: statePollutingWarnings.map((issue) => formatAuditIssue(issue)),
     ordinaryWarningCount: ordinaryWarnings.length,
   };
@@ -708,10 +647,8 @@ ${chapterContent}`;
       : await this.chat(chatMessages, chatOptions);
 
     const result = this.parseAuditResult(response.content, resolvedLanguage);
-    const previousChapterAuditIssues = await this.loadPreviousChapterAuditIssues(bookDir, chapterNumber);
     const gateDecision = evaluateEditorialAuditGate({
       issues: result.issues,
-      previousChapterAuditIssues,
       language: resolvedLanguage,
     });
     const gateSummary = gateDecision.rejectionReasons.join(isEnglish ? "; " : "；");
@@ -885,24 +822,6 @@ ${overrides}\n`;
       return await readFile(join(chaptersDir, prevFile), "utf-8");
     } catch {
       return "";
-    }
-  }
-
-  private async loadPreviousChapterAuditIssues(bookDir: string, currentChapter: number): Promise<ReadonlyArray<string>> {
-    if (currentChapter <= 1) return [];
-
-    try {
-      const raw = await readFile(join(bookDir, "chapters", "index.json"), "utf-8");
-      const parsed = JSON.parse(raw) as ReadonlyArray<{
-        readonly number?: unknown;
-        readonly auditIssues?: unknown;
-      }>;
-      const previousChapter = parsed.find((chapter) => chapter.number === currentChapter - 1);
-      return Array.isArray(previousChapter?.auditIssues)
-        ? previousChapter.auditIssues.filter((issue): issue is string => typeof issue === "string")
-        : [];
-    } catch {
-      return [];
     }
   }
 

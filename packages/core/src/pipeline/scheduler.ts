@@ -36,6 +36,8 @@ interface ApprovalGuardResult {
   readonly reason?: string;
 }
 
+type ChapterWriteOutcome = "approved" | "audit-failed" | "runtime-transient";
+
 const AUTONOMOUS_APPROVED_STATUSES = new Set(["approved", "published", "imported"]);
 
 function normalizeError(error: unknown): Error {
@@ -52,6 +54,29 @@ function isNonRetryableRuntimeError(error: Error): boolean {
     || message.includes("model not found")
     || message.includes("baseurl 地址不正确")
     || message.includes("inkos_llm_api_key not set")
+  );
+}
+
+function isTransientRuntimeError(error: Error): boolean {
+  const message = error.message.toLowerCase();
+  return (
+    message.includes("429")
+    || message.includes("529")
+    || message.includes("502")
+    || message.includes("503")
+    || message.includes("504")
+    || message.includes("api 返回 429")
+    || message.includes("api 返回 529")
+    || message.includes("api 返回 502")
+    || message.includes("api 返回 503")
+    || message.includes("api 返回 504")
+    || message.includes("rate limit")
+    || message.includes("overloaded")
+    || message.includes("timeout")
+    || message.includes("timed out")
+    || message.includes("econnreset")
+    || message.includes("socket hang up")
+    || message.includes("fetch failed")
   );
 }
 
@@ -266,9 +291,13 @@ export class Scheduler {
 
       let success = false;
       while (this.running && !this.isDailyCapReached() && !this.pausedBooks.has(bookId)) {
-        success = await this.writeOneChapter(bookId, bookConfig);
-        if (success) {
+        const outcome = await this.writeOneChapter(bookId, bookConfig);
+        if (outcome === "approved") {
+          success = true;
           break;
+        }
+        if (outcome === "runtime-transient") {
+          return;
         }
 
         const failures = this.consecutiveFailures.get(bookId) ?? 0;
@@ -288,8 +317,8 @@ export class Scheduler {
     }
   }
 
-  /** Write one chapter for a book. Returns true if approved. */
-  private async writeOneChapter(bookId: string, bookConfig: BookConfig): Promise<boolean> {
+  /** Write one chapter for a book. */
+  private async writeOneChapter(bookId: string, bookConfig: BookConfig): Promise<ChapterWriteOutcome> {
     try {
       const historyGate = await this.ensureHistoryApproved(bookId);
       if (!historyGate.ready) {
@@ -299,13 +328,13 @@ export class Scheduler {
           historyGate.chapterNumber ?? 0,
           historyGate.issueCategories ?? [],
         );
-        return false;
+        return "audit-failed";
       }
 
       // Compute temperature override: base 0.7 + failures * step
       const failures = this.consecutiveFailures.get(bookId) ?? 0;
       const tempOverride = failures > 0
-        ? Math.min(1.2, 0.7 + failures * this.gates.retryTemperatureStep)
+        ? Math.min(1.0, 0.7 + failures * this.gates.retryTemperatureStep)
         : undefined;
 
       const result = await this.pipeline.writeNextChapter(bookId, undefined, tempOverride);
@@ -321,14 +350,14 @@ export class Scheduler {
         await this.approveChapter(bookId, result.chapterNumber);
         this.recordChapterWritten();
         this.config.onChapterComplete?.(bookId, result.chapterNumber, "approved");
-        return true;
+        return "approved";
       }
 
       // Audit failed — apply quality gates
       const issueCategories = result.auditResult.issues.map((i) => i.category);
       await this.handleAuditFailure(bookId, result.chapterNumber, issueCategories);
       this.config.onChapterComplete?.(bookId, result.chapterNumber, result.status);
-      return false;
+      return "audit-failed";
     } catch (e) {
       const error = normalizeError(e);
       this.log?.error(`${bookId} write attempt crashed: ${formatErrorForLog(error)}`);
@@ -339,10 +368,14 @@ export class Scheduler {
           `non-retryable runtime error: ${summarizePauseReason(error)}`,
           0,
         );
-        return false;
+        return "audit-failed";
+      }
+      if (isTransientRuntimeError(error)) {
+        this.log?.warn(`${bookId} transient runtime error, deferring retry to the next scheduler tick`);
+        return "runtime-transient";
       }
       await this.handleRuntimeFailure(bookId, 0);
-      return false;
+      return "audit-failed";
     }
   }
 
