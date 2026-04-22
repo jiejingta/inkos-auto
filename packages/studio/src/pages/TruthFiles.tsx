@@ -11,6 +11,13 @@ interface TruthFile {
   readonly preview: string;
 }
 
+interface TruthSyncResult {
+  readonly narrativeMemorySynced: boolean;
+  readonly structuredStateSynced: boolean;
+  readonly currentStateFactHistorySynced: boolean;
+  readonly snapshotRefreshed: boolean;
+}
+
 interface Nav {
   toBook: (id: string) => void;
   toDashboard: () => void;
@@ -23,6 +30,7 @@ export function TruthFiles({ bookId, nav, theme, t }: { bookId: string; nav: Nav
   const [editMode, setEditMode] = useState(false);
   const [editText, setEditText] = useState("");
   const [savingEdit, setSavingEdit] = useState(false);
+  const [lastSyncResult, setLastSyncResult] = useState<TruthSyncResult | null>(null);
   const { data: fileData, refetch: refetchFile } = useApi<{ file: string; content: string | null }>(
     selected ? `/books/${bookId}/truth/${selected}` : "",
   );
@@ -40,12 +48,13 @@ export function TruthFiles({ bookId, nav, theme, t }: { bookId: string; nav: Nav
     if (!selected) return;
     setSavingEdit(true);
     try {
-      await fetchJson(`/books/${bookId}/truth/${selected}`, {
+      const response = await fetchJson<{ sync?: TruthSyncResult }>(`/books/${bookId}/truth/${selected}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ content: editText }),
       });
       setEditMode(false);
+      setLastSyncResult(response.sync ?? null);
       refetchFile();
     } catch (e) {
       alert(e instanceof Error ? e.message : "Failed to save");
@@ -66,13 +75,32 @@ export function TruthFiles({ bookId, nav, theme, t }: { bookId: string; nav: Nav
 
       <h1 className="font-serif text-3xl">{t("truth.title")}</h1>
 
+      {lastSyncResult && (
+        <div className={`border ${c.cardStatic} rounded-lg px-4 py-3 text-sm text-muted-foreground`}>
+          <div className="font-medium text-foreground mb-1">{t("truth.saveComplete")}</div>
+          {lastSyncResult.narrativeMemorySynced
+            || lastSyncResult.structuredStateSynced
+            || lastSyncResult.currentStateFactHistorySynced
+            || lastSyncResult.snapshotRefreshed ? (
+              <ul className="list-disc pl-5 space-y-1">
+                {lastSyncResult.narrativeMemorySynced && <li>{t("truth.syncNarrativeMemory")}</li>}
+                {lastSyncResult.structuredStateSynced && <li>{t("truth.syncStructuredState")}</li>}
+                {lastSyncResult.currentStateFactHistorySynced && <li>{t("truth.syncStateFacts")}</li>}
+                {lastSyncResult.snapshotRefreshed && <li>{t("truth.syncSnapshot")}</li>}
+              </ul>
+            ) : (
+              <div>{t("truth.noFollowupSync")}</div>
+            )}
+          </div>
+      )}
+
       <div className="grid grid-cols-[240px_1fr] gap-6">
         {/* File list */}
         <div className={`border ${c.cardStatic} rounded-lg overflow-hidden`}>
           {data?.files.map((f) => (
             <button
               key={f.name}
-              onClick={() => { setSelected(f.name); setEditMode(false); }}
+              onClick={() => { setSelected(f.name); setEditMode(false); setLastSyncResult(null); }}
               className={`w-full text-left px-3 py-2.5 text-sm border-b border-border/40 transition-colors ${
                 selected === f.name
                   ? "bg-primary/10 text-primary"

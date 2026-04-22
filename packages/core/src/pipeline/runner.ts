@@ -1326,6 +1326,84 @@ export class PipelineRunner {
     }
   }
 
+  async syncAfterTruthEdit(bookId: string, editedFile: string): Promise<{
+    readonly bookId: string;
+    readonly file: string;
+    readonly narrativeMemorySynced: boolean;
+    readonly structuredStateSynced: boolean;
+    readonly currentStateFactHistorySynced: boolean;
+    readonly snapshotRefreshed: boolean;
+  }> {
+    const releaseLock = await this.state.acquireBookLock(bookId);
+    try {
+      const bookDir = this.state.bookDir(bookId);
+      const chapters = await this.state.loadChapterIndex(bookId);
+      const latestChapter = chapters.length > 0
+        ? Math.max(...chapters.map((chapter) => chapter.number))
+        : 0;
+
+      const snapshotEligibleFiles = new Set([
+        "current_state.md",
+        "particle_ledger.md",
+        "pending_hooks.md",
+        "chapter_summaries.md",
+        "subplot_board.md",
+        "emotional_arcs.md",
+        "character_matrix.md",
+      ]);
+      const structuredStateFiles = new Set([
+        "current_state.md",
+        "particle_ledger.md",
+        "pending_hooks.md",
+      ]);
+      const narrativeMemoryFiles = new Set([
+        "current_state.md",
+        "particle_ledger.md",
+        "pending_hooks.md",
+        "chapter_summaries.md",
+        "subplot_board.md",
+        "emotional_arcs.md",
+        "character_matrix.md",
+      ]);
+
+      let narrativeMemorySynced = false;
+      let structuredStateSynced = false;
+      let currentStateFactHistorySynced = false;
+      let snapshotRefreshed = false;
+
+      if (latestChapter > 0 && structuredStateFiles.has(editedFile)) {
+        await this.syncLegacyStructuredStateFromMarkdown(bookDir, latestChapter);
+        structuredStateSynced = true;
+      }
+
+      if (latestChapter > 0 && editedFile === "current_state.md") {
+        await this.syncCurrentStateFactHistory(bookId, latestChapter);
+        currentStateFactHistorySynced = true;
+      }
+
+      if (latestChapter > 0 && narrativeMemoryFiles.has(editedFile)) {
+        await this.syncNarrativeMemoryIndex(bookId);
+        narrativeMemorySynced = true;
+      }
+
+      if (latestChapter > 0 && snapshotEligibleFiles.has(editedFile)) {
+        await this.state.snapshotState(bookId, latestChapter);
+        snapshotRefreshed = true;
+      }
+
+      return {
+        bookId,
+        file: editedFile,
+        narrativeMemorySynced,
+        structuredStateSynced,
+        currentStateFactHistorySynced,
+        snapshotRefreshed,
+      };
+    } finally {
+      await releaseLock();
+    }
+  }
+
   /** Get book status overview. */
   async getBookStatus(bookId: string): Promise<BookStatusInfo> {
     const book = await this.state.loadBookConfig(bookId);

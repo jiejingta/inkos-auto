@@ -8,6 +8,9 @@ const initBookMock = vi.fn();
 const runRadarMock = vi.fn();
 const reviseDraftMock = vi.fn();
 const resyncChapterArtifactsMock = vi.fn();
+const approveChapterMock = vi.fn();
+const approveAllPendingChaptersMock = vi.fn();
+const syncAfterTruthEditMock = vi.fn();
 const writeNextChapterMock = vi.fn();
 const rollbackToChapterMock = vi.fn();
 const saveChapterIndexMock = vi.fn();
@@ -77,6 +80,9 @@ vi.mock("@jiejingtazhu/inkos-core", () => {
     runRadar = runRadarMock;
     reviseDraft = reviseDraftMock;
     resyncChapterArtifacts = resyncChapterArtifactsMock;
+    approveChapter = approveChapterMock;
+    approveAllPendingChapters = approveAllPendingChaptersMock;
+    syncAfterTruthEdit = syncAfterTruthEditMock;
     writeNextChapter = writeNextChapterMock;
   }
 
@@ -161,6 +167,9 @@ describe("createStudioServer daemon lifecycle", () => {
     runRadarMock.mockReset();
     reviseDraftMock.mockReset();
     resyncChapterArtifactsMock.mockReset();
+    approveChapterMock.mockReset();
+    approveAllPendingChaptersMock.mockReset();
+    syncAfterTruthEditMock.mockReset();
     writeNextChapterMock.mockReset();
     rollbackToChapterMock.mockReset();
     saveChapterIndexMock.mockReset();
@@ -186,6 +195,22 @@ describe("createStudioServer daemon lifecycle", () => {
       revised: false,
       status: "ready-for-review",
       auditResult: { passed: true, issues: [], summary: "synced" },
+    });
+    approveChapterMock.mockResolvedValue({
+      chapterNumber: 3,
+      promotedReviewStage: true,
+    });
+    approveAllPendingChaptersMock.mockResolvedValue({
+      approvedCount: 2,
+      promotedReviewStages: 1,
+    });
+    syncAfterTruthEditMock.mockResolvedValue({
+      bookId: "demo-book",
+      file: "current_state.md",
+      narrativeMemorySynced: true,
+      structuredStateSynced: true,
+      currentStateFactHistorySynced: true,
+      snapshotRefreshed: true,
     });
     writeNextChapterMock.mockResolvedValue({
       chapterNumber: 3,
@@ -340,6 +365,14 @@ describe("createStudioServer daemon lifecycle", () => {
     const bookDir = join(root, "books", "demo-book");
     const storyDir = join(bookDir, "story");
     await mkdir(storyDir, { recursive: true });
+    syncAfterTruthEditMock.mockResolvedValueOnce({
+      bookId: "demo-book",
+      file: "current_focus.md",
+      narrativeMemorySynced: false,
+      structuredStateSynced: false,
+      currentStateFactHistorySynced: false,
+      snapshotRefreshed: false,
+    });
     await Promise.all([
       writeFile(join(storyDir, "author_intent.md"), "# Author Intent\n\nStay cold.\n", "utf-8"),
       writeFile(join(storyDir, "current_focus.md"), "# Current Focus\n\nReturn to the old case.\n", "utf-8"),
@@ -361,10 +394,56 @@ describe("createStudioServer daemon lifecycle", () => {
       body: JSON.stringify({ content: "# Current Focus\n\nPull focus back to the harbor trail.\n" }),
     });
     expect(updateCurrentFocus.status).toBe(200);
+    await expect(updateCurrentFocus.json()).resolves.toMatchObject({
+      ok: true,
+      sync: {
+        narrativeMemorySynced: false,
+        structuredStateSynced: false,
+        currentStateFactHistorySynced: false,
+        snapshotRefreshed: false,
+      },
+    });
 
     await expect(readFile(join(storyDir, "current_focus.md"), "utf-8")).resolves.toBe(
       "# Current Focus\n\nPull focus back to the harbor trail.\n",
     );
+    expect(syncAfterTruthEditMock).toHaveBeenCalledWith("demo-book", "current_focus.md");
+  });
+
+  it("routes chapter approval through PipelineRunner.approveChapter", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/books/demo-book/chapters/3/approve", {
+      method: "POST",
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      ok: true,
+      chapterNumber: 3,
+      status: "approved",
+      promotedReviewStage: true,
+    });
+    expect(approveChapterMock).toHaveBeenCalledWith("demo-book", 3);
+    expect(saveChapterIndexMock).not.toHaveBeenCalled();
+  });
+
+  it("routes approve-all through PipelineRunner.approveAllPendingChapters", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/books/demo-book/chapters/approve-all", {
+      method: "POST",
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      ok: true,
+      approvedCount: 2,
+      promotedReviewStages: 1,
+    });
+    expect(approveAllPendingChaptersMock).toHaveBeenCalledWith("demo-book");
   });
 
   it("reflects project edits immediately without restarting the studio server", async () => {

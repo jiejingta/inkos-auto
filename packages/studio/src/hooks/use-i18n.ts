@@ -233,6 +233,12 @@ const strings = {
   "truth.notFound": { zh: "文件未找到", en: "File not found" },
   "truth.selectFile": { zh: "选择文件查看内容", en: "Select a file to view" },
   "truth.selectHint": { zh: "选择文件查看内容", en: "Select a file to view" },
+  "truth.saveComplete": { zh: "保存完成，已执行以下同步：", en: "Saved. Follow-up sync completed:" },
+  "truth.syncNarrativeMemory": { zh: "已刷新叙事记忆索引", en: "Narrative memory index refreshed" },
+  "truth.syncStructuredState": { zh: "已同步结构化状态镜像", en: "Structured state mirror refreshed" },
+  "truth.syncStateFacts": { zh: "已刷新 current_state 事实历史", en: "Current-state fact history refreshed" },
+  "truth.syncSnapshot": { zh: "已刷新最新章节快照", en: "Latest chapter snapshot refreshed" },
+  "truth.noFollowupSync": { zh: "这个文件已保存，但不需要额外同步动作。", en: "This file was saved and does not require extra follow-up sync." },
 
   // Dashboard
   "dash.subtitle": { zh: "管理你的文学宇宙和 AI 辅助草稿。", en: "Manage your literary universe and AI-assisted drafts." },

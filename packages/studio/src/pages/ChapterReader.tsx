@@ -24,7 +24,11 @@ interface ChapterData {
   readonly chapterNumber: number;
   readonly filename: string;
   readonly content: string;
+  readonly status?: string;
+  readonly indexedTitle?: string;
 }
+
+const REVIEWABLE_CHAPTER_STATUSES = new Set(["ready-for-review", "audit-failed"]);
 
 interface Nav {
   toBook: (id: string) => void;
@@ -112,6 +116,7 @@ export function ChapterReader({ bookId, chapterNumber, nav, theme, t }: {
   };
 
   const paragraphs = body.split(/\n\n+/).filter(Boolean);
+  const reviewable = data.status ? REVIEWABLE_CHAPTER_STATUSES.has(data.status) : false;
 
   return (
     <div className="max-w-4xl mx-auto space-y-10 fade-in">
@@ -176,20 +181,30 @@ export function ChapterReader({ bookId, chapterNumber, nav, theme, t }: {
             </button>
           )}
 
-          <button
-            onClick={handleApprove}
-            className="flex items-center gap-2 px-4 py-2 text-xs font-bold bg-emerald-500/10 text-emerald-600 rounded-xl hover:bg-emerald-500 hover:text-white transition-all border border-emerald-500/20 shadow-sm"
-          >
-            <CheckCircle2 size={14} />
-            {t("reader.approve")}
-          </button>
-          <button
-            onClick={handleReject}
-            className="flex items-center gap-2 px-4 py-2 text-xs font-bold bg-destructive/10 text-destructive rounded-xl hover:bg-destructive hover:text-white transition-all border border-destructive/20 shadow-sm"
-          >
-            <XCircle size={14} />
-            {t("reader.reject")}
-          </button>
+          {reviewable && (
+            <>
+              <button
+                onClick={handleApprove}
+                className="flex items-center gap-2 px-4 py-2 text-xs font-bold bg-emerald-500/10 text-emerald-600 rounded-xl hover:bg-emerald-500 hover:text-white transition-all border border-emerald-500/20 shadow-sm"
+              >
+                <CheckCircle2 size={14} />
+                {t("reader.approve")}
+              </button>
+              <button
+                onClick={async () => {
+                  const confirmed = window.confirm(
+                    `确认驳回第${chapterNumber}章，并把状态回滚到第${chapterNumber - 1}章吗？这会丢弃本章及其后的所有章节。`,
+                  );
+                  if (!confirmed) return;
+                  await handleReject();
+                }}
+                className="flex items-center gap-2 px-4 py-2 text-xs font-bold bg-destructive/10 text-destructive rounded-xl hover:bg-destructive hover:text-white transition-all border border-destructive/20 shadow-sm"
+              >
+                <XCircle size={14} />
+                {t("reader.reject")}
+              </button>
+            </>
+          )}
         </div>
       </div>
 

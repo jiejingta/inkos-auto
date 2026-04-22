@@ -43,6 +43,7 @@
 
 - 手动 `inkos write next` 也已经接上同样的前置护栏。只要历史里还存在不是 `approved` / `published` / `imported` 的章节，就不会继续往后写。
 - `review approve` 不再只是改 chapter index；如果目标章节是 `audit-failed`，会先把 staged truth promote 到正式 `story/*`，再更新 snapshot 与记忆索引。
+- Studio 里的章节 `Approve` / `Approve All` 现在也改成直接走 `PipelineRunner.approveChapter()` / `approveAllPendingChapters()`，不再只是前端改 chapter index 状态。
 - 对于 401/403、Anthropic 鉴权缺失、明显的模型缺失或 baseUrl 错配等非重试型运行错误，守护器会立即暂停该书；普通 400 不再直接判死，而是保留重试并把原始错误文本写进日志，方便继续判断是字段兼容、上下文长度还是内容审查问题。
 - provider 层不再区分 Kimi 专用温度钳制；现在统一使用全局温度上限 `<= 1.0`。scheduler 的 retry temperature 也同步封顶到 `1.0`，从源头避免把请求温度抬过接口上限。
 - provider 层现在会在单次 API 调用内部自动重试瞬时上游错误（如 `429`、`529`、`502/503/504`、超时、连接重置），优先在当前环节内消化波动，避免直接把整章流水线从头重跑。
@@ -134,6 +135,7 @@ override 的持久化位置：
 - `current_focus.md` 不再只在建书时初始化一次。只要“最新章节”正式向前推进，runner 就会为“下一章”重新生成 focus 并覆盖 `story/current_focus.md`。这条刷新路径已覆盖：正常写章通过、手动 revise 后通过、`repair-state` / `sync` 成功、import replay 完成，以及 `review approve` / `approve-all` 提交最新章节的 staged truth。
 - `current_focus.md` 现在改成本地轻量刷新，不再为此额外调用一次 planner。它主要复用 `story/runtime/chapter-XXXX.intent.md` 里的最近 intent 信息来滚动到“下一章”，从而避免一边写章一边多耗一次规划调用。
 - `particle_ledger.md` 现在有“失管检测”。当账本长期停留在初始化/占位状态，而当前题材又启用了数值体系时，流水线会优先复用本次 settle 或 final analyzer 已经产出的账本结果来修复；只有仍拿不到有效账本时，才额外回退到一次 analyzer 重建，尽量减少 API 调用。
+- Studio 的 Truth Files 页面保存后，不再只是覆盖 `story/*.md` 文件；现在会按文件类型触发本地零额外模型调用的后续同步，例如叙事记忆索引、结构化状态镜像、`current_state` 事实历史和最新章节快照。
 - 最终正文在落盘前会再跑一轮本地阻断校验：如果修订后又引入了“第X章”元叙事、角色讨论自己处在第几章、禁用句式等硬错误，会触发一次额外的 spot-fix，并重新合并审计结果，避免这类错误直接漏进正式章节。
 - 章节正文文件在落盘前会清洗顶部残留 heading。无论是写新章、修订章节还是批量重命名，都会先剥掉正文里残留的旧标题，再统一写入新的正式标题，避免出现“双标题”开头。
 
@@ -169,7 +171,7 @@ override 的持久化位置：
 - `packages/core/src/pipeline/scheduler.ts`
   - `inkos up` 的自动推进规则在这里。
 - `packages/core/src/pipeline/runner.ts`
-  - 单章完整流水线、手动 `auditDraft` / `reviseDraft` / `writeNextChapter` 的主入口；同时负责 `current_focus.md` 自动滚动，以及 `particle_ledger.md` 的失管检测/低调用量回填。
+  - 单章完整流水线、手动 `auditDraft` / `reviseDraft` / `writeNextChapter` 的主入口；同时负责 `current_focus.md` 自动滚动、`particle_ledger.md` 的失管检测/低调用量回填，以及 Truth Files 手改后的本地同步。
 - `packages/core/src/utils/length-metrics.ts`
   - 章节长度区间的计算入口。现在会优先读取项目配置里的 `lengthGovernance.range.softRatio / hardRatio`，默认值仍保持旧版区间。
 - `packages/core/src/pipeline/chapter-persistence.ts`
@@ -195,7 +197,7 @@ override 的持久化位置：
 - `packages/studio/src/pages/PromptManager.tsx`
   - 提示词工作台页面：查看源码片段、编辑 override。
 - `packages/studio/src/api/server.ts`
-  - `/api/project/prompts` 的读写接口。
+  - `/api/project/prompts` 的读写接口；章节 approve / approve-all 已改走 core 审批流程；Truth Files 保存后会调用 core 的 truth-edit 同步入口。
 - `packages/cli/src/commands/studio.ts`
   - Studio 启动入口。Windows 下源码模式需要把 `tsx` loader 通过 `file://` URL 传给 `node --import`，但主入口 `.ts` 仍保持普通路径。
 - `scripts/pack-release.mjs`

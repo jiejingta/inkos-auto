@@ -243,7 +243,15 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       const match = files.find((f) => f.startsWith(paddedNum) && f.endsWith(".md"));
       if (!match) return c.json({ error: "Chapter not found" }, 404);
       const content = await readFile(join(chaptersDir, match), "utf-8");
-      return c.json({ chapterNumber: num, filename: match, content });
+      const chapterIndex = await state.loadChapterIndex(id);
+      const chapterMeta = chapterIndex.find((chapter) => chapter.number === num);
+      return c.json({
+        chapterNumber: num,
+        filename: match,
+        content,
+        status: chapterMeta?.status ?? "drafted",
+        indexedTitle: chapterMeta?.title,
+      });
     } catch {
       return c.json({ error: "Chapter not found" }, 404);
     }
@@ -357,12 +365,30 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const num = parseInt(c.req.param("num"), 10);
 
     try {
-      const index = await state.loadChapterIndex(id);
-      const updated = index.map((ch) =>
-        ch.number === num ? { ...ch, status: "approved" as const } : ch,
-      );
-      await state.saveChapterIndex(id, updated);
-      return c.json({ ok: true, chapterNumber: num, status: "approved" });
+      const pipeline = new PipelineRunner(await buildPipelineConfig());
+      const result = await pipeline.approveChapter(id, num);
+      return c.json({
+        ok: true,
+        chapterNumber: num,
+        status: "approved",
+        promotedReviewStage: result.promotedReviewStage,
+      });
+    } catch (e) {
+      return c.json({ error: String(e) }, 500);
+    }
+  });
+
+  app.post("/api/books/:id/chapters/approve-all", async (c) => {
+    const id = c.req.param("id");
+
+    try {
+      const pipeline = new PipelineRunner(await buildPipelineConfig());
+      const result = await pipeline.approveAllPendingChapters(id);
+      return c.json({
+        ok: true,
+        approvedCount: result.approvedCount,
+        promotedReviewStages: result.promotedReviewStages,
+      });
     } catch (e) {
       return c.json({ error: String(e) }, 500);
     }
@@ -921,7 +947,9 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const { writeFile: writeFileFs, mkdir: mkdirFs } = await import("node:fs/promises");
     await mkdirFs(join(bookDir, "story"), { recursive: true });
     await writeFileFs(join(bookDir, "story", file), content, "utf-8");
-    return c.json({ ok: true });
+    const pipeline = new PipelineRunner(await buildPipelineConfig());
+    const sync = await pipeline.syncAfterTruthEdit(id, file);
+    return c.json({ ok: true, sync });
   });
 
   // =============================================

@@ -49,6 +49,8 @@ interface BookData {
   readonly nextChapter: number;
 }
 
+const REVIEWABLE_CHAPTER_STATUSES = new Set(["ready-for-review", "audit-failed"]);
+
 type ReviseMode = "spot-fix" | "polish" | "rewrite" | "rework" | "anti-detect";
 type ExportFormat = "txt" | "md" | "epub";
 type BookStatus = "active" | "paused" | "outlining" | "completed" | "dropped";
@@ -78,6 +80,7 @@ const STATUS_CONFIG: Record<string, { color: string; icon: React.ReactNode }> = 
   drafted: { color: "text-muted-foreground bg-muted/20", icon: <FileText size={12} /> },
   "needs-revision": { color: "text-destructive bg-destructive/10", icon: <RotateCcw size={12} /> },
   imported: { color: "text-blue-500 bg-blue-500/10", icon: <Download size={12} /> },
+  "audit-failed": { color: "text-destructive bg-destructive/10", icon: <X size={12} /> },
 };
 
 export function BookDetail({
@@ -266,19 +269,21 @@ export function BookDetail({
 
   const handleApproveAll = async () => {
     if (!data) return;
-    const reviewable = data.chapters.filter((ch) => ch.status === "ready-for-review");
-    let failed = 0;
-    for (const chapter of reviewable) {
-      try {
-        await postApi(`/books/${bookId}/chapters/${chapter.number}/approve`);
-      } catch {
-        failed += 1;
+    try {
+      const result = await fetchJson<{ approvedCount: number; promotedReviewStages: number }>(`/books/${bookId}/chapters/approve-all`, {
+        method: "POST",
+      });
+      if (result.approvedCount > 0) {
+        alert(
+          result.promotedReviewStages > 0
+            ? `${result.approvedCount} chapter(s) approved, ${result.promotedReviewStages} staged truth set(s) committed.`
+            : `${result.approvedCount} chapter(s) approved.`,
+        );
       }
+      refetch();
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "Approve failed");
     }
-    if (failed > 0) {
-      alert(`${failed}/${reviewable.length} approve(s) failed`);
-    }
-    refetch();
   };
 
   if (loading) return (
@@ -293,7 +298,7 @@ export function BookDetail({
 
   const { book, chapters } = data;
   const totalWords = chapters.reduce((sum, ch) => sum + (ch.wordCount ?? 0), 0);
-  const reviewCount = chapters.filter((ch) => ch.status === "ready-for-review").length;
+  const reviewCount = chapters.filter((ch) => REVIEWABLE_CHAPTER_STATUSES.has(ch.status)).length;
 
   const currentWordCount = settingsWordCount ?? book.chapterWordCount;
   const currentTargetChapters = settingsTargetChapters ?? book.targetChapters ?? 0;
@@ -540,7 +545,7 @@ export function BookDetail({
                   </td>
                   <td className="px-6 py-4 text-right">
                     <div className="flex gap-1.5 justify-end opacity-0 group-hover:opacity-100 transition-opacity">
-                      {ch.status === "ready-for-review" && (
+                      {REVIEWABLE_CHAPTER_STATUSES.has(ch.status) && (
                         <>
                           <button
                             onClick={async () => {
@@ -554,6 +559,12 @@ export function BookDetail({
                           </button>
                           <button
                             onClick={async () => {
+                              const confirmed = window.confirm(
+                                data?.book.language === "en"
+                                  ? `Reject chapter ${ch.number} and roll back state to chapter ${ch.number - 1}? This will discard this chapter and all later chapters.`
+                                  : `确认驳回第${ch.number}章，并把状态回滚到第${ch.number - 1}章吗？这会丢弃本章及其后的所有章节。`,
+                              );
+                              if (!confirmed) return;
                               try { await postApi(`/books/${bookId}/chapters/${ch.number}/reject`); refetch(); }
                               catch (e) { alert(e instanceof Error ? e.message : "Reject failed"); }
                             }}
