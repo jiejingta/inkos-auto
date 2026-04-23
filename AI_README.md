@@ -44,6 +44,7 @@
 - 手动 `inkos write next` 也已经接上同样的前置护栏。只要历史里还存在不是 `approved` / `published` / `imported` 的章节，就不会继续往后写。
 - `review approve` 不再只是改 chapter index；如果目标章节是 `audit-failed`，会先把 staged truth promote 到正式 `story/*`，再更新 snapshot 与记忆索引。
 - Studio 里的章节 `Approve` / `Approve All` 现在也改成直接走 `PipelineRunner.approveChapter()` / `approveAllPendingChapters()`，不再只是前端改 chapter index 状态。
+- Studio 里的章节 `Reject` 在一类老项目上也补了兜底：如果要丢弃的后续章节全部是 `audit-failed`，且正式 `chapter_summaries.md` 仍停在上一章，就算上一章快照缺失，也允许直接回退并裁掉失败章；对其他状态的回滚仍保持原来的严格快照恢复。
 - 对于 401/403、Anthropic 鉴权缺失、明显的模型缺失或 baseUrl 错配等非重试型运行错误，守护器会立即暂停该书；普通 400 不再直接判死，而是保留重试并把原始错误文本写进日志，方便继续判断是字段兼容、上下文长度还是内容审查问题。
 - provider 层不再区分 Kimi 专用温度钳制；现在统一使用全局温度上限 `<= 1.0`。scheduler 的 retry temperature 也同步封顶到 `1.0`，从源头避免把请求温度抬过接口上限。
 - provider 层现在会在单次 API 调用内部自动重试瞬时上游错误（如 `429`、`529`、`502/503/504`、超时、连接重置），优先在当前环节内消化波动，避免直接把整章流水线从头重跑。
@@ -183,7 +184,7 @@ override 的持久化位置：
 - `packages/core/src/pipeline/chapter-state-recovery.ts`
   - `state-degraded` 的降级保存与恢复元数据。
 - `packages/core/src/state/manager.ts`
-  - review staging 的目录结构、promote/discard、rollback 时的清理。
+  - review staging 的目录结构、promote/discard、rollback 时的清理；现在 rollback 会对“仅裁掉 trailing audit-failed 章节且正式 truth 未前进”的场景做无快照安全回退。
 - `packages/cli/src/commands/review.ts`
   - 手动 `approve` / `approve-all` 现在会真正提交 staged truth，而不只是改状态。
 - `packages/cli/src/commands/write.ts`

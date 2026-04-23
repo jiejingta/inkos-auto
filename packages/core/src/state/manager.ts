@@ -2,7 +2,11 @@ import { readFile, writeFile, mkdir, readdir, rm, stat, unlink, open } from "nod
 import { join } from "node:path";
 import type { BookConfig } from "../models/book.js";
 import type { ChapterMeta } from "../models/chapter.js";
-import { bootstrapStructuredStateFromMarkdown, resolveDurableStoryProgress } from "./state-bootstrap.js";
+import {
+  bootstrapStructuredStateFromMarkdown,
+  parseChapterSummariesMarkdown,
+  resolveDurableStoryProgress,
+} from "./state-bootstrap.js";
 
 export class StateManager {
   private static readonly requiredReviewTruthFileSet = new Set<string>([
@@ -499,24 +503,28 @@ export class StateManager {
     bookId: string,
     targetChapter: number,
   ): Promise<ReadonlyArray<number>> {
-    const restored = await this.restoreState(bookId, targetChapter);
-    if (!restored) {
-      throw new Error(`Cannot restore snapshot for chapter ${targetChapter} in "${bookId}"`);
-    }
-
     const bookDir = this.bookDir(bookId);
     const chaptersDir = join(bookDir, "chapters");
     const index = await this.loadChapterIndex(bookId);
 
     const kept: ChapterMeta[] = [];
     const discarded: number[] = [];
+    const discardedEntries: ChapterMeta[] = [];
 
     for (const entry of index) {
       if (entry.number <= targetChapter) {
         kept.push(entry);
       } else {
         discarded.push(entry.number);
+        discardedEntries.push(entry);
       }
+    }
+
+    const restored = await this.restoreState(bookId, targetChapter);
+    const skippedSnapshotRestore = !restored
+      && await this.canRollbackWithoutSnapshotRestore(bookId, targetChapter, discardedEntries);
+    if (!restored && !skippedSnapshotRestore) {
+      throw new Error(`Cannot restore snapshot for chapter ${targetChapter} in "${bookId}"`);
     }
 
     // Delete chapter markdown files for discarded chapters
@@ -588,9 +596,41 @@ export class StateManager {
       rm(join(bookDir, "story", "memory.db-wal"), { force: true }),
     ]);
     await this.discardReviewStage(bookId);
+    if (skippedSnapshotRestore) {
+      await bootstrapStructuredStateFromMarkdown({
+        bookDir,
+        fallbackChapter: targetChapter,
+      });
+    }
 
     await this.saveChapterIndex(bookId, kept);
     return discarded;
+  }
+
+  private async canRollbackWithoutSnapshotRestore(
+    bookId: string,
+    targetChapter: number,
+    discardedEntries: ReadonlyArray<ChapterMeta>,
+  ): Promise<boolean> {
+    if (discardedEntries.length === 0) {
+      return false;
+    }
+
+    if (!discardedEntries.every((entry) => entry.status === "audit-failed")) {
+      return false;
+    }
+
+    try {
+      const summariesMarkdown = await readFile(
+        join(this.bookDir(bookId), "story", "chapter_summaries.md"),
+        "utf-8",
+      );
+      const highestProjectedChapter = parseChapterSummariesMarkdown(summariesMarkdown)
+        .reduce((max, row) => Math.max(max, row.chapter), 0);
+      return highestProjectedChapter <= targetChapter;
+    } catch {
+      return false;
+    }
   }
 
   private async exists(path: string): Promise<boolean> {

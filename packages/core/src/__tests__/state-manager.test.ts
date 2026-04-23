@@ -1293,6 +1293,73 @@ describe("StateManager", () => {
       await expect(manager.rollbackToChapter(bookId, 99)).rejects.toThrow("Cannot restore snapshot");
     });
 
+    it("allows rejecting trailing audit-failed chapters without a target snapshot when official truth is already at the target", async () => {
+      const fallbackBookId = "rollback-audit-failed-fallback";
+      await manager.saveBookConfig(fallbackBookId, {
+        id: fallbackBookId,
+        title: "Rollback Audit Failed Fallback",
+        platform: "tomato",
+        genre: "xuanhuan",
+        status: "active",
+        targetChapters: 10,
+        chapterWordCount: 3000,
+        createdAt: "2026-03-31T00:00:00Z",
+        updatedAt: "2026-03-31T00:00:00Z",
+      });
+
+      const bookDir = manager.bookDir(fallbackBookId);
+      const storyDir = join(bookDir, "story");
+      const chaptersDir = join(bookDir, "chapters");
+      await mkdir(storyDir, { recursive: true });
+      await mkdir(chaptersDir, { recursive: true });
+
+      await writeFile(join(storyDir, "current_state.md"), "# State\n\n- After chapter 4.\n", "utf-8");
+      await writeFile(join(storyDir, "pending_hooks.md"), "# Hooks\n\n- hook-1\n- hook-2\n", "utf-8");
+      await writeFile(
+        join(storyDir, "chapter_summaries.md"),
+        [
+          "# Summaries",
+          "",
+          "| chapter | title |",
+          "| --- | --- |",
+          "| 1 | Title 1 |",
+          "| 2 | Title 2 |",
+          "| 3 | Title 3 |",
+          "| 4 | Title 4 |",
+          "",
+        ].join("\n"),
+        "utf-8",
+      );
+
+      await writeFile(join(chaptersDir, "0001_Title_One.md"), "# Chapter 1\n\nContent 1.", "utf-8");
+      await writeFile(join(chaptersDir, "0002_Title_Two.md"), "# Chapter 2\n\nContent 2.", "utf-8");
+      await writeFile(join(chaptersDir, "0003_Title_Three.md"), "# Chapter 3\n\nContent 3.", "utf-8");
+      await writeFile(join(chaptersDir, "0004_Title_Four.md"), "# Chapter 4\n\nContent 4.", "utf-8");
+      await writeFile(join(chaptersDir, "0005_Title_Five.md"), "# Chapter 5\n\nDraft 5.", "utf-8");
+
+      const now = "2026-03-31T00:00:00Z";
+      await manager.saveChapterIndex(fallbackBookId, [
+        { number: 1, title: "Title One", status: "approved", wordCount: 100, createdAt: now, updatedAt: now, auditIssues: [], lengthWarnings: [] },
+        { number: 2, title: "Title Two", status: "approved", wordCount: 100, createdAt: now, updatedAt: now, auditIssues: [], lengthWarnings: [] },
+        { number: 3, title: "Title Three", status: "approved", wordCount: 100, createdAt: now, updatedAt: now, auditIssues: [], lengthWarnings: [] },
+        { number: 4, title: "Title Four", status: "approved", wordCount: 100, createdAt: now, updatedAt: now, auditIssues: [], lengthWarnings: [] },
+        { number: 5, title: "Title Five", status: "audit-failed", wordCount: 100, createdAt: now, updatedAt: now, auditIssues: ["continuity"], lengthWarnings: [] },
+      ]);
+
+      const discarded = await manager.rollbackToChapter(fallbackBookId, 4);
+
+      expect(discarded).toEqual([5]);
+
+      const state = await readFile(join(storyDir, "current_state.md"), "utf-8");
+      expect(state).toContain("After chapter 4");
+
+      const index = await manager.loadChapterIndex(fallbackBookId);
+      expect(index).toHaveLength(4);
+      expect(index.every((entry) => entry.number <= 4)).toBe(true);
+
+      await expect(stat(join(chaptersDir, "0005_Title_Five.md"))).rejects.toThrow();
+    });
+
     it("removes sqlite memory files when rolling back", async () => {
       await setupRollbackBook();
 
