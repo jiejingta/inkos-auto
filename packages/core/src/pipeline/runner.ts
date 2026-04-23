@@ -27,7 +27,7 @@ import { readBookRules, readGenreProfile } from "../agents/rules-reader.js";
 import { analyzeAITells } from "../agents/ai-tells.js";
 import { analyzeSensitiveWords } from "../agents/sensitive-words.js";
 import { StateManager } from "../state/manager.js";
-import { MemoryDB, type Fact } from "../state/memory-db.js";
+import { MemoryDB, type Fact, type StoredSummary } from "../state/memory-db.js";
 import { dispatchNotification, dispatchWebhookEvent } from "../notify/dispatcher.js";
 import type { WebhookEvent } from "../notify/webhook.js";
 import { applyPromptOverridePair } from "../prompts/overrides.js";
@@ -42,7 +42,7 @@ import { validateChapterTitle, validatePostWrite } from "../agents/post-write-va
 import { loadNarrativeMemorySeed, loadSnapshotCurrentStateFacts } from "../state/runtime-state-store.js";
 import { rewriteStructuredStateFromMarkdown } from "../state/state-bootstrap.js";
 import { renderChapterSummariesProjection } from "../state/state-projections.js";
-import { parseChapterSummariesMarkdown } from "../utils/story-markdown.js";
+import { parseChapterSummariesMarkdown, parseMarkdownTableRows } from "../utils/story-markdown.js";
 import { readFile, readdir, writeFile, mkdir, rename, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import {
@@ -1214,45 +1214,7 @@ export class PipelineRunner {
   }> {
     const releaseLock = await this.state.acquireBookLock(bookId);
     try {
-      const book = await this.state.loadBookConfig(bookId);
-      const bookDir = this.state.bookDir(bookId);
-      const index = [...(await this.state.loadChapterIndex(bookId))];
-      const targetIndex = index.findIndex((chapter) => chapter.number === chapterNumber);
-      if (targetIndex < 0) {
-        throw new Error(`Chapter ${chapterNumber} not found in "${bookId}"`);
-      }
-
-      const chapter = index[targetIndex]!;
-      const latestChapter = Math.max(...index.map((entry) => entry.number));
-      const promotedReviewStage = chapter.status === "audit-failed"
-        ? await this.state.promoteReviewStage(bookId, chapterNumber)
-        : false;
-
-      if (promotedReviewStage) {
-        await this.state.snapshotState(bookId, chapterNumber);
-        await this.syncNarrativeMemoryIndex(bookId);
-        await this.syncCurrentStateFactHistory(bookId, chapterNumber);
-        if (chapterNumber === latestChapter) {
-          await this.refreshCurrentFocusAfterProgress(
-            book,
-            bookDir,
-            chapterNumber,
-            await this.resolveBookLanguage(book),
-          );
-        }
-      }
-
-      index[targetIndex] = {
-        ...chapter,
-        status: "approved",
-        updatedAt: new Date().toISOString(),
-      };
-      await this.state.saveChapterIndex(bookId, index);
-
-      return {
-        chapterNumber,
-        promotedReviewStage,
-      };
+      return await this.approveChapterUnlocked(bookId, chapterNumber);
     } finally {
       await releaseLock();
     }
@@ -1324,6 +1286,51 @@ export class PipelineRunner {
     } finally {
       await releaseLock();
     }
+  }
+
+  private async approveChapterUnlocked(bookId: string, chapterNumber: number): Promise<{
+    readonly chapterNumber: number;
+    readonly promotedReviewStage: boolean;
+  }> {
+    const book = await this.state.loadBookConfig(bookId);
+    const bookDir = this.state.bookDir(bookId);
+    const index = [...(await this.state.loadChapterIndex(bookId))];
+    const targetIndex = index.findIndex((chapter) => chapter.number === chapterNumber);
+    if (targetIndex < 0) {
+      throw new Error(`Chapter ${chapterNumber} not found in "${bookId}"`);
+    }
+
+    const chapter = index[targetIndex]!;
+    const latestChapter = Math.max(...index.map((entry) => entry.number));
+    const promotedReviewStage = chapter.status === "audit-failed"
+      ? await this.state.promoteReviewStage(bookId, chapterNumber)
+      : false;
+
+    if (promotedReviewStage) {
+      await this.state.snapshotState(bookId, chapterNumber);
+      await this.syncNarrativeMemoryIndex(bookId);
+      await this.syncCurrentStateFactHistory(bookId, chapterNumber);
+      if (chapterNumber === latestChapter) {
+        await this.refreshCurrentFocusAfterProgress(
+          book,
+          bookDir,
+          chapterNumber,
+          await this.resolveBookLanguage(book),
+        );
+      }
+    }
+
+    index[targetIndex] = {
+      ...chapter,
+      status: "approved",
+      updatedAt: new Date().toISOString(),
+    };
+    await this.state.saveChapterIndex(bookId, index);
+
+    return {
+      chapterNumber,
+      promotedReviewStage,
+    };
   }
 
   async rejectChapter(bookId: string, chapterNumber: number): Promise<{
@@ -1630,6 +1637,7 @@ export class PipelineRunner {
     const book = await this.state.loadBookConfig(bookId);
     const bookDir = this.state.bookDir(bookId);
     await this.assertNoPendingForwardWrite(bookId);
+    await this.ensureLatestApprovedTruthIsSynchronized(bookId, book, bookDir);
     const chapterNumber = await this.state.getNextChapterNumber(bookId);
     const stageLanguage = await this.resolveBookLanguage(book);
     this.logStage(stageLanguage, { zh: "准备章节输入", en: "preparing chapter inputs" });
@@ -2115,6 +2123,14 @@ export class PipelineRunner {
     this.logStage(stageLanguage, { zh: "根据已编辑正文同步真相文件与索引", en: "syncing truth files and indexes from edited chapter body" });
     const { profile: gp } = await this.loadGenreProfile(book.genre);
     const pipelineLang = book.language ?? gp.language;
+    await this.backfillCompanionTruthGaps({
+      bookId,
+      book,
+      bookDir,
+      targetChapter,
+      index,
+      language: pipelineLang,
+    });
     const content = await this.readChapterContent(bookDir, targetChapter);
     const storyDir = join(bookDir, "story");
     const [oldState, oldHooks, oldLedger] = await Promise.all([
@@ -3291,6 +3307,207 @@ ${matrix}`;
     throw new Error(
       `Chapter ${blockingChapter.number} is ${blockingChapter.status}. Approve, reject, or revise pending chapters before writing a new chapter.`,
     );
+  }
+
+  private async ensureLatestApprovedTruthIsSynchronized(
+    bookId: string,
+    book: BookConfig,
+    bookDir: string,
+  ): Promise<void> {
+    const index = [...(await this.state.loadChapterIndex(bookId))]
+      .sort((left, right) => left.number - right.number);
+    const latestChapter = index[index.length - 1];
+    if (!latestChapter || latestChapter.status !== "approved") {
+      return;
+    }
+
+    const driftReason = await this.detectApprovedTruthDrift(bookDir, latestChapter.number);
+    if (!driftReason) {
+      return;
+    }
+
+    const language = await this.resolveBookLanguage(book);
+    this.logStage(language, {
+      zh: `检测到第${latestChapter.number}章已批准但真相文件未同步（${driftReason}），先重建该章状态`,
+      en: `approved chapter ${latestChapter.number} has stale truth files (${driftReason}); resyncing it before writing forward`,
+    });
+
+    const resyncResult = await this._resyncChapterArtifactsLocked(bookId, latestChapter.number);
+    if (resyncResult.status !== "ready-for-review") {
+      throw new Error(
+        `Approved chapter ${latestChapter.number} truth resync produced ${resyncResult.status}; review it before writing forward.`,
+      );
+    }
+    await this.approveChapterUnlocked(bookId, latestChapter.number);
+  }
+
+  private async detectApprovedTruthDrift(bookDir: string, latestChapter: number): Promise<string | null> {
+    const storyDir = join(bookDir, "story");
+    const snapshotCurrentState = join(storyDir, "snapshots", String(latestChapter), "current_state.md");
+    const currentState = await readFile(join(storyDir, "current_state.md"), "utf-8").catch(() => "");
+    const currentStateChapter = this.extractCurrentStateChapter(currentState);
+    if (currentStateChapter !== null && currentStateChapter < latestChapter) {
+      return `current_state.md at chapter ${currentStateChapter}`;
+    }
+
+    if (currentStateChapter !== null && !await this.pathExists(snapshotCurrentState)) {
+      return `missing snapshot ${latestChapter}`;
+    }
+
+    const chapterSummaries = await readFile(join(storyDir, "chapter_summaries.md"), "utf-8").catch(() => "");
+    const latestSummaryChapter = parseChapterSummariesMarkdown(chapterSummaries)
+      .reduce((max, row) => Math.max(max, row.chapter), 0);
+    if (currentStateChapter !== null && latestSummaryChapter > 0 && latestSummaryChapter < latestChapter) {
+      return `chapter_summaries.md at chapter ${latestSummaryChapter}`;
+    }
+
+    const emotionalArcs = await readFile(join(storyDir, "emotional_arcs.md"), "utf-8").catch(() => "");
+    const latestEmotionalChapter = this.extractLatestEmotionalArcChapter(emotionalArcs);
+    if (latestChapter > 1 && latestEmotionalChapter > 0 && latestEmotionalChapter < latestChapter - 1) {
+      return `emotional_arcs.md at chapter ${latestEmotionalChapter}`;
+    }
+
+    return null;
+  }
+
+  private async backfillCompanionTruthGaps(params: {
+    readonly bookId: string;
+    readonly book: BookConfig;
+    readonly bookDir: string;
+    readonly targetChapter: number;
+    readonly index: ReadonlyArray<ChapterMeta>;
+    readonly language: "zh" | "en";
+  }): Promise<void> {
+    if (params.targetChapter <= 1) {
+      return;
+    }
+
+    const storyDir = join(params.bookDir, "story");
+    const [summaryMarkdown, emotionalMarkdown] = await Promise.all([
+      readFile(join(storyDir, "chapter_summaries.md"), "utf-8").catch(() => ""),
+      readFile(join(storyDir, "emotional_arcs.md"), "utf-8").catch(() => ""),
+    ]);
+    const summaryRows = parseChapterSummariesMarkdown(summaryMarkdown);
+    const summaryChapters = new Set(summaryRows.map((row) => row.chapter));
+    const latestEmotionalChapter = this.extractLatestEmotionalArcChapter(emotionalMarkdown);
+    const eligibleChapters = [...params.index]
+      .filter((chapter) => chapter.number <= params.targetChapter)
+      .filter((chapter) => chapter.number > 0)
+      .filter((chapter) => FORWARD_WRITE_APPROVED_STATUSES.has(chapter.status) || chapter.number === params.targetChapter)
+      .sort((left, right) => left.number - right.number);
+
+    const needsSummary = new Set(
+      eligibleChapters
+        .filter((chapter) => !summaryChapters.has(chapter.number))
+        .map((chapter) => chapter.number),
+    );
+    const needsEmotional = new Set(
+      latestEmotionalChapter > 0 && latestEmotionalChapter < params.targetChapter
+        ? eligibleChapters
+          .filter((chapter) => chapter.number > latestEmotionalChapter)
+          .map((chapter) => chapter.number)
+        : [],
+    );
+    const chaptersToAnalyze = eligibleChapters
+      .filter((chapter) => needsSummary.has(chapter.number) || needsEmotional.has(chapter.number));
+
+    if (chaptersToAnalyze.length === 0) {
+      return;
+    }
+
+    this.logStage(params.language, {
+      zh: `回填第${chaptersToAnalyze[0]!.number}-${chaptersToAnalyze[chaptersToAnalyze.length - 1]!.number}章摘要/情绪弧线`,
+      en: `backfilling summaries/emotional arcs for chapters ${chaptersToAnalyze[0]!.number}-${chaptersToAnalyze[chaptersToAnalyze.length - 1]!.number}`,
+    });
+
+    const analyzer = new ChapterAnalyzerAgent(this.agentCtxFor("chapter-analyzer", params.bookId));
+    const summariesByChapter = new Map(summaryRows.map((row) => [row.chapter, row]));
+
+    for (const chapter of chaptersToAnalyze) {
+      const document = await this.readChapterDocument(params.bookDir, chapter.number, chapter.title);
+      const output = await analyzer.analyzeChapter({
+        book: params.book,
+        bookDir: params.bookDir,
+        chapterNumber: chapter.number,
+        chapterTitle: document.title || chapter.title,
+        chapterContent: document.content,
+      });
+
+      if (needsSummary.has(chapter.number)) {
+        const row = this.extractBackfilledSummaryRow(
+          output.chapterSummary,
+          chapter.number,
+          document.title || chapter.title,
+        );
+        if (row) {
+          summariesByChapter.set(chapter.number, row);
+          await this.saveChapterSummaryRows(params.bookDir, [...summariesByChapter.values()], params.language);
+        }
+      }
+
+      if (needsEmotional.has(chapter.number) && output.updatedEmotionalArcs.trim()) {
+        await writeFile(join(storyDir, "emotional_arcs.md"), output.updatedEmotionalArcs, "utf-8");
+      }
+    }
+  }
+
+  private extractBackfilledSummaryRow(
+    markdown: string,
+    chapterNumber: number,
+    fallbackTitle: string,
+  ): StoredSummary | null {
+    const parsed = parseChapterSummariesMarkdown(markdown);
+    const row = parsed.find((entry) => entry.chapter === chapterNumber) ?? parsed[0];
+    if (!row) {
+      return null;
+    }
+
+    return {
+      ...row,
+      chapter: chapterNumber,
+      title: row.title.trim() || fallbackTitle,
+    };
+  }
+
+  private async saveChapterSummaryRows(
+    bookDir: string,
+    rows: ReadonlyArray<StoredSummary>,
+    language: "zh" | "en",
+  ): Promise<void> {
+    const storyDir = join(bookDir, "story");
+    const stateDir = join(storyDir, "state");
+    const deduped = [...new Map(
+      rows
+        .filter((row) => Number.isInteger(row.chapter) && row.chapter > 0)
+        .sort((left, right) => left.chapter - right.chapter)
+        .map((row) => [row.chapter, row] as const),
+    ).values()];
+    const state = { rows: deduped };
+
+    await mkdir(stateDir, { recursive: true });
+    await Promise.all([
+      writeFile(join(storyDir, "chapter_summaries.md"), renderChapterSummariesProjection(state, language), "utf-8"),
+      writeFile(join(stateDir, "chapter_summaries.json"), JSON.stringify(state, null, 2), "utf-8"),
+    ]);
+  }
+
+  private extractLatestEmotionalArcChapter(markdown: string): number {
+    return parseMarkdownTableRows(markdown).reduce((max, row) => {
+      const chapterCell = row[1]?.trim() ?? "";
+      return /^\d+$/.test(chapterCell) ? Math.max(max, parseInt(chapterCell, 10)) : max;
+    }, 0);
+  }
+
+  private extractCurrentStateChapter(markdown: string): number | null {
+    const tableMatch = markdown.match(/\|\s*(?:当前章节|Current Chapter)\s*\|\s*(\d+)\s*\|/i);
+    if (tableMatch?.[1]) {
+      return parseInt(tableMatch[1], 10);
+    }
+    const textMatch = markdown.match(/(?:当前章节|Current Chapter)\D{0,12}(\d+)/i);
+    if (textMatch?.[1]) {
+      return parseInt(textMatch[1], 10);
+    }
+    return null;
   }
 
   // ---------------------------------------------------------------------------

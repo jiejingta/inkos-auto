@@ -44,6 +44,7 @@
 - 手动 `inkos write next` 也已经接上同样的前置护栏。只要历史里还存在不是 `approved` / `published` / `imported` 的章节，就不会继续往后写。
 - `review approve` 不再只是改 chapter index；如果目标章节是 `audit-failed`，会先把 staged truth promote 到正式 `story/*`，再更新 snapshot 与记忆索引。
 - Studio 里的章节 `Approve` / `Approve All` 现在也改成直接走 `PipelineRunner.approveChapter()` / `approveAllPendingChapters()`，不再只是前端改 chapter index 状态。
+- 守护器自动批准章节时，也统一走 `PipelineRunner.approveChapter()`。这样 `audit-failed -> approved` 不会只改 `chapters/index.json`，而是会同时提交 staged truth、刷新 snapshot 与记忆索引。
 - Studio 里的章节 `Reject` 现在改走 `PipelineRunner.rejectChapter()`。对于老项目里“最新章是 `audit-failed`，但上一章快照缺失”的情况，会自动退化成“先裁掉失败章，再把上一章当最新章做一次 truth sync”来重建状态；对其他回滚场景仍保持原来的严格快照恢复。
 - 对于 401/403、Anthropic 鉴权缺失、明显的模型缺失或 baseUrl 错配等非重试型运行错误，守护器会立即暂停该书；普通 400 不再直接判死，而是保留重试并把原始错误文本写进日志，方便继续判断是字段兼容、上下文长度还是内容审查问题。
 - provider 层不再区分 Kimi 专用温度钳制；现在统一使用全局温度上限 `<= 1.0`。scheduler 的 retry temperature 也同步封顶到 `1.0`，从源头避免把请求温度抬过接口上限。
@@ -123,19 +124,22 @@ override 的持久化位置：
 典型链路：
 
 1. `writeNextChapter()`
-2. Planner / Composer 生成治理输入
-3. Writer 产出正文
-4. Title Refiner 读取 `book_rules` + 全量历史标题，对章节标题做最终复审，禁止本地机械补尾式改名
-5. Auditor 审计
-6. 若存在阻断性问题，则进入 Reviser
-7. 若最终状态是 `ready-for-review`，正式 truth files / snapshot 一次性落盘
-8. 若最终状态是 `audit-failed`，章节正文会落盘，但候选 truth 只进 review staging，不覆盖正式 `story/*`
+2. 若最新章节已经是 `approved`，但 `current_state.md` / `chapter_summaries.md` / `emotional_arcs.md` / snapshot 仍落后，会先自动对最新已批准章做一次 truth sync，再重新 approve，避免踩着过期状态写下一章。
+3. Planner / Composer 生成治理输入
+4. Writer 产出正文
+5. Title Refiner 读取 `book_rules` + 全量历史标题，对章节标题做最终复审，禁止本地机械补尾式改名
+6. Auditor 审计
+7. 若存在阻断性问题，则进入 Reviser
+8. 若最终状态是 `ready-for-review`，正式 truth files / snapshot 一次性落盘
+9. 若最终状态是 `audit-failed`，章节正文会落盘，但候选 truth 只进 review staging，不覆盖正式 `story/*`
 
 补充：
 
 - `current_focus.md` 不再只在建书时初始化一次。只要“最新章节”正式向前推进，runner 就会为“下一章”重新生成 focus 并覆盖 `story/current_focus.md`。这条刷新路径已覆盖：正常写章通过、手动 revise 后通过、`repair-state` / `sync` 成功、import replay 完成，以及 `review approve` / `approve-all` 提交最新章节的 staged truth。
 - `current_focus.md` 现在改成本地轻量刷新，不再为此额外调用一次 planner。它主要复用 `story/runtime/chapter-XXXX.intent.md` 里的最近 intent 信息来滚动到“下一章”，从而避免一边写章一边多耗一次规划调用。
 - `particle_ledger.md` 现在有“失管检测”。当账本长期停留在初始化/占位状态，而当前题材又启用了数值体系时，流水线会优先复用本次 settle 或 final analyzer 已经产出的账本结果来修复；只有仍拿不到有效账本时，才额外回退到一次 analyzer 重建，尽量减少 API 调用。
+- `chapter_summaries.md` 的写入现在额外做“当前章节摘要补写”。即使本次状态结算走的是结构化 runtime delta，也会用 delta 渲染当前章摘要并按章节号去重追加，避免长篇运行后摘要表只停在早期章节。
+- `write sync` / 写前自愈现在会检测辅助真相文件缺口：如果 `chapter_summaries.md` 或 `story/state/chapter_summaries.json` 少了历史章节，或者 `emotional_arcs.md` 长期停在早期章节，会复用 `chapter-analyzer` 按缺失章节逐章回填；同一轮分析会同时补摘要和情绪弧线，避免为两个文件重复调用模型。
 - Studio 的 Truth Files 页面保存后，不再只是覆盖 `story/*.md` 文件；现在会按文件类型触发本地零额外模型调用的后续同步，例如叙事记忆索引、结构化状态镜像、`current_state` 事实历史和最新章节快照。
 - 最终正文在落盘前会再跑一轮本地阻断校验：如果修订后又引入了“第X章”元叙事、角色讨论自己处在第几章、禁用句式等硬错误，会触发一次额外的 spot-fix，并重新合并审计结果，避免这类错误直接漏进正式章节。
 - 章节正文文件在落盘前会清洗顶部残留 heading。无论是写新章、修订章节还是批量重命名，都会先剥掉正文里残留的旧标题，再统一写入新的正式标题，避免出现“双标题”开头。
@@ -172,7 +176,7 @@ override 的持久化位置：
 - `packages/core/src/pipeline/scheduler.ts`
   - `inkos up` 的自动推进规则在这里。
 - `packages/core/src/pipeline/runner.ts`
-  - 单章完整流水线、手动 `auditDraft` / `reviseDraft` / `writeNextChapter` 的主入口；同时负责 `current_focus.md` 自动滚动、`particle_ledger.md` 的失管检测/低调用量回填、Truth Files 手改后的本地同步，以及 Studio/后续 CLI 共用的 `rejectChapter()` 回退恢复逻辑。
+  - 单章完整流水线、手动 `auditDraft` / `reviseDraft` / `writeNextChapter` 的主入口；同时负责“已批准章节但 truth files 落后”的写前自愈、历史摘要/情绪弧线缺口回填、`current_focus.md` 自动滚动、`particle_ledger.md` 的失管检测/低调用量回填、Truth Files 手改后的本地同步，以及 Studio/后续 CLI 共用的 `rejectChapter()` 回退恢复逻辑。
 - `packages/core/src/utils/length-metrics.ts`
   - 章节长度区间的计算入口。现在会优先读取项目配置里的 `lengthGovernance.range.softRatio / hardRatio`，默认值仍保持旧版区间。
 - `packages/core/src/pipeline/chapter-persistence.ts`

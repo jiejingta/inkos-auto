@@ -141,22 +141,18 @@ describe("Scheduler", () => {
     const state = (scheduler as unknown as {
       state: {
         loadChapterIndex: (bookId: string) => Promise<unknown>;
-        saveChapterIndex: (bookId: string, index: unknown) => Promise<void>;
       };
     }).state;
     const loadChapterIndex = vi.spyOn(state, "loadChapterIndex")
       .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([{
-        number: 1,
-        title: "Fresh Chapter",
-        status: "ready-for-review",
-        wordCount: 2100,
-        createdAt: "2026-04-01T00:00:00.000Z",
-        updatedAt: "2026-04-01T00:00:00.000Z",
-        auditIssues: [],
-        lengthWarnings: [],
-      }]);
-    const saveChapterIndex = vi.spyOn(state, "saveChapterIndex").mockResolvedValue(undefined);
+      .mockResolvedValueOnce([]);
+    const approveChapter = vi.spyOn(
+      (scheduler as unknown as { pipeline: { approveChapter: (bookId: string, chapterNumber: number) => Promise<unknown> } }).pipeline,
+      "approveChapter",
+    ).mockResolvedValue({
+      chapterNumber: 1,
+      promotedReviewStage: false,
+    });
 
     vi.spyOn(
       (scheduler as unknown as { pipeline: { writeNextChapter: (bookId: string, words?: number, temp?: number) => Promise<unknown> } }).pipeline,
@@ -181,13 +177,8 @@ describe("Scheduler", () => {
     ).writeOneChapter("book-1", bookConfig);
 
     expect(success).toBe("approved");
-    expect(loadChapterIndex).toHaveBeenCalledTimes(2);
-    expect(saveChapterIndex).toHaveBeenCalledWith("book-1", [
-      expect.objectContaining({
-        number: 1,
-        status: "approved",
-      }),
-    ]);
+    expect(loadChapterIndex).toHaveBeenCalledTimes(1);
+    expect(approveChapter).toHaveBeenCalledWith("book-1", 1);
     expect(onChapterComplete).toHaveBeenCalledWith("book-1", 1, "approved");
   });
 
@@ -359,7 +350,6 @@ describe("Scheduler", () => {
     const state = (scheduler as unknown as {
       state: {
         loadChapterIndex: (bookId: string) => Promise<unknown>;
-        saveChapterIndex: (bookId: string, index: unknown) => Promise<void>;
       };
     }).state;
     vi.spyOn(state, "loadChapterIndex")
@@ -393,12 +383,12 @@ describe("Scheduler", () => {
         auditIssues: [],
         lengthWarnings: [],
       }]);
-    const saveChapterIndex = vi.spyOn(state, "saveChapterIndex").mockResolvedValue(undefined);
 
     const pipeline = (scheduler as unknown as {
       pipeline: {
         auditDraft: (bookId: string, chapterNumber?: number) => Promise<unknown>;
         reviseDraft: (bookId: string, chapterNumber?: number) => Promise<unknown>;
+        approveChapter: (bookId: string, chapterNumber: number) => Promise<unknown>;
       };
     }).pipeline;
     const auditDraft = vi.spyOn(pipeline, "auditDraft").mockResolvedValue({
@@ -408,6 +398,10 @@ describe("Scheduler", () => {
       summary: "clean",
     });
     const reviseDraft = vi.spyOn(pipeline, "reviseDraft");
+    const approveChapter = vi.spyOn(pipeline, "approveChapter").mockResolvedValue({
+      chapterNumber: 1,
+      promotedReviewStage: false,
+    });
 
     const result = await (
       scheduler as unknown as {
@@ -418,12 +412,7 @@ describe("Scheduler", () => {
     expect(result.ready).toBe(true);
     expect(auditDraft).toHaveBeenCalledWith("book-1", 1);
     expect(reviseDraft).not.toHaveBeenCalled();
-    expect(saveChapterIndex).toHaveBeenCalledWith("book-1", [
-      expect.objectContaining({
-        number: 1,
-        status: "approved",
-      }),
-    ]);
+    expect(approveChapter).toHaveBeenCalledWith("book-1", 1);
   });
 
   it("escalates repeated structural history failures to rewrite mode", async () => {
@@ -442,6 +431,7 @@ describe("Scheduler", () => {
           mode?: string,
           options?: { consecutiveFailures?: number },
         ) => Promise<unknown>;
+        approveChapter: (bookId: string, chapterNumber: number) => Promise<unknown>;
       };
     };
     runtime.consecutiveFailures.set("book-1", 4);
@@ -497,6 +487,10 @@ describe("Scheduler", () => {
       applied: true,
       status: "ready-for-review",
     });
+    const approveChapter = vi.spyOn(runtime.pipeline, "approveChapter").mockResolvedValue({
+      chapterNumber: 1,
+      promotedReviewStage: true,
+    });
 
     const result = await (
       scheduler as unknown as {
@@ -511,5 +505,6 @@ describe("Scheduler", () => {
       "rewrite",
       { consecutiveFailures: 4 },
     );
+    expect(approveChapter).toHaveBeenCalledWith("book-1", 1);
   });
 });

@@ -3114,6 +3114,147 @@ describe("PipelineRunner", () => {
     await rm(root, { recursive: true, force: true });
   });
 
+  it("backfills missing summaries and stale emotional arcs before syncing the latest chapter", async () => {
+    const { root, runner, state, bookId } = await createRunnerFixture({
+      inputGovernanceMode: "legacy",
+    });
+    const now = "2026-03-19T00:00:00.000Z";
+    const bookDir = state.bookDir(bookId);
+    const storyDir = join(bookDir, "story");
+    const chaptersDir = join(bookDir, "chapters");
+
+    await mkdir(join(storyDir, "state"), { recursive: true });
+    await Promise.all([
+      writeFile(join(storyDir, "current_state.md"), createStateCard({
+        chapter: 2,
+        location: "旧港便利店",
+        protagonistState: "林越仍在追查师债。",
+        goal: "确认第三盏灯的来源。",
+        conflict: "旧债线索开始收紧。",
+      }), "utf-8"),
+      writeFile(join(storyDir, "pending_hooks.md"), "# 伏笔池\n", "utf-8"),
+      writeFile(join(storyDir, "particle_ledger.md"), "stable ledger", "utf-8"),
+      writeFile(join(storyDir, "chapter_summaries.md"), [
+        "# 章节摘要",
+        "",
+        "| 章节 | 标题 | 出场人物 | 关键事件 | 状态变化 | 伏笔动态 | 情绪基调 | 章节类型 |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| 1 | 夜灯 | 林越 | 林越进入旧港 | 追查开始 | 师债线索开启 | 压抑 | 主线推进 |",
+        "",
+      ].join("\n"), "utf-8"),
+      writeFile(join(storyDir, "state", "chapter_summaries.json"), JSON.stringify({
+        rows: [{
+          chapter: 1,
+          title: "夜灯",
+          characters: "林越",
+          events: "林越进入旧港",
+          stateChanges: "追查开始",
+          hookActivity: "师债线索开启",
+          mood: "压抑",
+          chapterType: "主线推进",
+        }],
+      }, null, 2), "utf-8"),
+      writeFile(join(storyDir, "emotional_arcs.md"), [
+        "| 角色 | 章节 | 情绪状态 | 触发事件 | 强度(1-10) | 弧线方向 |",
+        "| --- | --- | --- | --- | --- | --- |",
+        "| 林越 | 1 | 警惕 | 进入旧港 | 6 | →潜伏 |",
+        "",
+      ].join("\n"), "utf-8"),
+      writeFile(join(chaptersDir, "0001_夜灯.md"), "# 第1章 夜灯\n\n林越走进旧港。", "utf-8"),
+      writeFile(join(chaptersDir, "0002_暗账.md"), "# 第2章 暗账\n\n林越在柜台后找到账本。", "utf-8"),
+      writeFile(join(chaptersDir, "0003_第三盏灯.md"), "# 第3章 第三盏灯\n\n第三盏灯在雨里亮了。", "utf-8"),
+    ]);
+    await state.saveChapterIndex(bookId, [
+      {
+        number: 1,
+        title: "夜灯",
+        status: "approved",
+        wordCount: 20,
+        createdAt: now,
+        updatedAt: now,
+        auditIssues: [],
+        lengthWarnings: [],
+      },
+      {
+        number: 2,
+        title: "暗账",
+        status: "approved",
+        wordCount: 24,
+        createdAt: now,
+        updatedAt: now,
+        auditIssues: [],
+        lengthWarnings: [],
+      },
+      {
+        number: 3,
+        title: "第三盏灯",
+        status: "approved",
+        wordCount: 24,
+        createdAt: now,
+        updatedAt: now,
+        auditIssues: [],
+        lengthWarnings: [],
+      },
+    ]);
+
+    const analyzeChapter = vi.spyOn(ChapterAnalyzerAgent.prototype, "analyzeChapter")
+      .mockImplementation(async (input) => createAnalyzedOutput({
+        chapterNumber: input.chapterNumber,
+        title: input.chapterTitle ?? `第${input.chapterNumber}章`,
+        content: input.chapterContent,
+        wordCount: input.chapterContent.length,
+        chapterSummary: `| ${input.chapterNumber} | ${input.chapterTitle ?? `第${input.chapterNumber}章`} | 林越 | 补齐第${input.chapterNumber}章事件 | 状态推进 | 师债推进 | 紧绷 | 主线推进 |`,
+        updatedEmotionalArcs: [
+          "| 角色 | 章节 | 情绪状态 | 触发事件 | 强度(1-10) | 弧线方向 |",
+          "| --- | --- | --- | --- | --- | --- |",
+          "| 林越 | 1 | 警惕 | 进入旧港 | 6 | →潜伏 |",
+          `| 林越 | ${input.chapterNumber} | 紧绷 | 补齐第${input.chapterNumber}章事件 | 7 | ↑推进 |`,
+          "",
+        ].join("\n"),
+      }));
+    vi.spyOn(WriterAgent.prototype, "settleChapterState").mockResolvedValue(
+      createWriterOutput({
+        chapterNumber: 3,
+        title: "第三盏灯",
+        content: "第三盏灯在雨里亮了。",
+        wordCount: "第三盏灯在雨里亮了。".length,
+        updatedState: createStateCard({
+          chapter: 3,
+          location: "旧港便利店",
+          protagonistState: "林越确认第三盏灯。",
+          goal: "追查灯后的师债线索。",
+          conflict: "旧债线索继续收紧。",
+        }),
+        updatedHooks: "# 伏笔池\n",
+        updatedLedger: "stable ledger",
+        chapterSummary: "| 3 | 第三盏灯 | 林越 | 第三盏灯亮起 | 状态推进 | 师债推进 | 紧绷 | 主线推进 |",
+        updatedEmotionalArcs: "",
+      }),
+    );
+    vi.spyOn(StateValidatorAgent.prototype, "validate").mockResolvedValue({
+      passed: true,
+      warnings: [],
+    });
+
+    try {
+      await runner.resyncChapterArtifacts(bookId, 3);
+      const summaries = await readFile(join(storyDir, "chapter_summaries.md"), "utf-8");
+      const summaryState = JSON.parse(await readFile(join(storyDir, "state", "chapter_summaries.json"), "utf-8")) as {
+        rows: Array<{ chapter: number }>;
+      };
+      const emotionalArcs = await readFile(join(storyDir, "emotional_arcs.md"), "utf-8");
+
+      expect(analyzeChapter).toHaveBeenCalledTimes(2);
+      expect(analyzeChapter.mock.calls.map((call) => call[0].chapterNumber)).toEqual([2, 3]);
+      expect(summaries).toContain("| 2 | 暗账 |");
+      expect(summaries).toContain("| 3 | 第三盏灯 |");
+      expect(summaryState.rows.map((row) => row.chapter)).toEqual([1, 2, 3]);
+      expect(emotionalArcs).toContain("| 林越 | 3 |");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("still persists the chapter when the state validator appends markdown after a valid JSON verdict", async () => {
     vi.restoreAllMocks();
     vi.spyOn(LengthNormalizerAgent.prototype, "normalizeChapter").mockImplementation(
@@ -4137,6 +4278,7 @@ describe("PipelineRunner", () => {
         lengthWarnings: [],
       },
     ]);
+    await state.snapshotState(bookId, 2);
 
     vi.spyOn(WriterAgent.prototype, "writeChapter").mockResolvedValue(
       createWriterOutput({
@@ -4361,6 +4503,7 @@ describe("PipelineRunner", () => {
       auditIssues: [],
       lengthWarnings: [],
     }]);
+    await state.snapshotState(bookId, 1);
 
     vi.spyOn(WriterAgent.prototype, "writeChapter").mockResolvedValue(
       createWriterOutput({
@@ -4421,6 +4564,7 @@ describe("PipelineRunner", () => {
       auditIssues: [],
       lengthWarnings: [],
     }]);
+    await state.snapshotState(bookId, 1);
 
     vi.spyOn(WriterAgent.prototype, "writeChapter").mockResolvedValue(
       createWriterOutput({

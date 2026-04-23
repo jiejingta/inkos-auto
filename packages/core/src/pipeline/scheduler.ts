@@ -471,23 +471,7 @@ export class Scheduler {
   }
 
   private async approveChapter(bookId: string, chapterNumber: number): Promise<void> {
-    const index = [...await this.state.loadChapterIndex(bookId)];
-    const chapterIndex = index.findIndex((chapter) => chapter.number === chapterNumber);
-    if (chapterIndex < 0) {
-      throw new Error(`Chapter ${chapterNumber} not found in "${bookId}"`);
-    }
-
-    const target = index[chapterIndex]!;
-    if (target.status === "approved") {
-      return;
-    }
-
-    index[chapterIndex] = {
-      ...target,
-      status: "approved",
-      updatedAt: new Date().toISOString(),
-    };
-    await this.state.saveChapterIndex(bookId, index);
+    await this.pipeline.approveChapter(bookId, chapterNumber);
     this.log?.info(`${bookId} chapter ${chapterNumber} auto-approved for autonomous mode`);
   }
 

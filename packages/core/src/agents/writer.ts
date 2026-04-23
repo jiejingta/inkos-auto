@@ -1124,16 +1124,20 @@ ${overrides}\n`;
   ): Promise<void> {
     const storyDir = join(bookDir, "story");
     const writes: Array<Promise<void>> = [];
+    const chapterSummary = output.runtimeStateDelta
+      ? this.renderDeltaSummaryRow(output.runtimeStateDelta)
+      : output.chapterSummary;
 
-    // Append chapter summary to chapter_summaries.md
-    if (!output.runtimeStateDelta && output.updatedChapterSummaries) {
+    // Store the full projection when available; then still append the current
+    // chapter row below. Appending is safe because appendChapterSummary
+    // de-duplicates by chapter number, and it repairs older structured
+    // projections that omitted chapter summary rows.
+    if (output.updatedChapterSummaries) {
       writes.push(writeFile(
         join(storyDir, "chapter_summaries.md"),
         output.updatedChapterSummaries,
         "utf-8",
       ));
-    } else if (!output.runtimeStateDelta && output.chapterSummary) {
-      writes.push(this.appendChapterSummary(storyDir, output.chapterSummary, language));
     }
 
     // Overwrite subplot board
@@ -1152,6 +1156,10 @@ ${overrides}\n`;
     }
 
     await Promise.all(writes);
+
+    if (chapterSummary) {
+      await this.appendChapterSummary(storyDir, chapterSummary, language);
+    }
   }
 
   private renderDeltaSummaryRow(delta: RuntimeStateDelta): string {

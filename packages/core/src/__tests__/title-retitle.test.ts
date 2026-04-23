@@ -222,6 +222,7 @@ describe("chapter title refinement", () => {
     const chaptersDir = join(bookDir, "chapters");
 
     await Promise.all([
+      writeFile(join(bookDir, "story", "current_state.md"), "# 当前状态\n\n| 字段 | 值 |\n| --- | --- |\n| 当前章节 | 1 |\n| 当前目标 | 守住主线 |\n", "utf-8"),
       writeFile(join(bookDir, "story", "chapter_summaries.md"), [
         "# 章节摘要",
         "",
@@ -242,6 +243,7 @@ describe("chapter title refinement", () => {
         lengthWarnings: [],
       }]),
     ]);
+    await state.snapshotState(bookId, 1);
 
     vi.spyOn(WriterAgent.prototype, "writeChapter").mockResolvedValue(
       createWriterOutput({
