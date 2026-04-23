@@ -10,6 +10,7 @@ const reviseDraftMock = vi.fn();
 const resyncChapterArtifactsMock = vi.fn();
 const approveChapterMock = vi.fn();
 const approveAllPendingChaptersMock = vi.fn();
+const rejectChapterMock = vi.fn();
 const syncAfterTruthEditMock = vi.fn();
 const writeNextChapterMock = vi.fn();
 const rollbackToChapterMock = vi.fn();
@@ -82,6 +83,7 @@ vi.mock("@jiejingtazhu/inkos-core", () => {
     resyncChapterArtifacts = resyncChapterArtifactsMock;
     approveChapter = approveChapterMock;
     approveAllPendingChapters = approveAllPendingChaptersMock;
+    rejectChapter = rejectChapterMock;
     syncAfterTruthEdit = syncAfterTruthEditMock;
     writeNextChapter = writeNextChapterMock;
   }
@@ -169,6 +171,7 @@ describe("createStudioServer daemon lifecycle", () => {
     resyncChapterArtifactsMock.mockReset();
     approveChapterMock.mockReset();
     approveAllPendingChaptersMock.mockReset();
+    rejectChapterMock.mockReset();
     syncAfterTruthEditMock.mockReset();
     writeNextChapterMock.mockReset();
     rollbackToChapterMock.mockReset();
@@ -677,29 +680,12 @@ describe("createStudioServer daemon lifecycle", () => {
   });
 
   it("uses rollback semantics for chapter rejection instead of only flipping status", async () => {
-    loadChapterIndexMock.mockResolvedValue([
-      {
-        number: 3,
-        title: "Broken Chapter",
-        status: "ready-for-review",
-        wordCount: 1800,
-        createdAt: "2026-04-07T00:00:00.000Z",
-        updatedAt: "2026-04-07T00:00:00.000Z",
-        auditIssues: ["continuity"],
-        lengthWarnings: [],
-      },
-      {
-        number: 4,
-        title: "Downstream Chapter",
-        status: "ready-for-review",
-        wordCount: 1900,
-        createdAt: "2026-04-07T00:00:00.000Z",
-        updatedAt: "2026-04-07T00:00:00.000Z",
-        auditIssues: [],
-        lengthWarnings: [],
-      },
-    ]);
-    rollbackToChapterMock.mockResolvedValue([3, 4]);
+    rejectChapterMock.mockResolvedValue({
+      chapterNumber: 3,
+      rolledBackTo: 2,
+      discarded: [3, 4],
+      recoveredByResync: false,
+    });
 
     const { createStudioServer } = await import("./server.js");
     const app = createStudioServer(cloneProjectConfig() as never, root);
@@ -715,9 +701,9 @@ describe("createStudioServer daemon lifecycle", () => {
       status: "rejected",
       rolledBackTo: 2,
       discarded: [3, 4],
+      recoveredByResync: false,
     });
-    expect(rollbackToChapterMock).toHaveBeenCalledWith("demo-book", 2);
-    expect(saveChapterIndexMock).not.toHaveBeenCalled();
+    expect(rejectChapterMock).toHaveBeenCalledWith("demo-book", 3);
   });
 
   it("routes create requests through the shared structured interaction runtime", async () => {

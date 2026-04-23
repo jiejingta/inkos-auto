@@ -2860,6 +2860,96 @@ describe("PipelineRunner", () => {
     await rm(root, { recursive: true, force: true });
   });
 
+  it("falls back to discard-and-resync when rejecting the latest audit-failed chapter without a snapshot", async () => {
+    const { root, runner, state, bookId } = await createRunnerFixture();
+    const now = "2026-03-19T00:00:00.000Z";
+
+    await state.saveChapterIndex(bookId, [
+      {
+        number: 1,
+        title: "旧章一",
+        status: "approved",
+        wordCount: 4,
+        createdAt: now,
+        updatedAt: now,
+        auditIssues: [],
+        lengthWarnings: [],
+      },
+      {
+        number: 2,
+        title: "旧章二",
+        status: "approved",
+        wordCount: 4,
+        createdAt: now,
+        updatedAt: now,
+        auditIssues: [],
+        lengthWarnings: [],
+      },
+      {
+        number: 3,
+        title: "旧章三",
+        status: "approved",
+        wordCount: 4,
+        createdAt: now,
+        updatedAt: now,
+        auditIssues: [],
+        lengthWarnings: [],
+      },
+      {
+        number: 4,
+        title: "旧章四",
+        status: "approved",
+        wordCount: 4,
+        createdAt: now,
+        updatedAt: now,
+        auditIssues: [],
+        lengthWarnings: [],
+      },
+      {
+        number: 5,
+        title: "坏章五",
+        status: "audit-failed",
+        wordCount: 4,
+        createdAt: now,
+        updatedAt: now,
+        auditIssues: ["continuity"],
+        lengthWarnings: [],
+      },
+    ]);
+
+    const runnerState = runner as unknown as {
+      state: StateManager;
+    };
+
+    const rollbackSpy = vi.spyOn(runnerState.state, "rollbackToChapter")
+      .mockRejectedValueOnce(new Error(`Cannot restore snapshot for chapter 4 in "${bookId}"`));
+    const discardSpy = vi.spyOn(runnerState.state, "discardChaptersAfter")
+      .mockResolvedValueOnce([5]);
+    const resyncSpy = vi.spyOn(
+      runner as unknown as {
+        _resyncChapterArtifactsLocked: (bookId: string, chapterNumber: number) => Promise<unknown>;
+      },
+      "_resyncChapterArtifactsLocked",
+    ).mockResolvedValueOnce({
+      status: "ready-for-review",
+      chapterNumber: 4,
+    });
+
+    const result = await runner.rejectChapter(bookId, 5);
+
+    expect(result).toEqual({
+      chapterNumber: 5,
+      rolledBackTo: 4,
+      discarded: [5],
+      recoveredByResync: true,
+    });
+    expect(rollbackSpy).toHaveBeenCalledWith(bookId, 4);
+    expect(discardSpy).toHaveBeenCalledWith(bookId, 4);
+    expect(resyncSpy).toHaveBeenCalledWith(bookId, 4);
+
+    await rm(root, { recursive: true, force: true });
+  });
+
   it("repairs the latest state-degraded chapter from persisted body without rewriting it", async () => {
     const { root, runner, state, bookId } = await createRunnerFixture({
       inputGovernanceMode: "legacy",

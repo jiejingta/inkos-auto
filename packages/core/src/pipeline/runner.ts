@@ -1326,6 +1326,59 @@ export class PipelineRunner {
     }
   }
 
+  async rejectChapter(bookId: string, chapterNumber: number): Promise<{
+    readonly chapterNumber: number;
+    readonly rolledBackTo: number;
+    readonly discarded: ReadonlyArray<number>;
+    readonly recoveredByResync: boolean;
+  }> {
+    const releaseLock = await this.state.acquireBookLock(bookId);
+    try {
+      const book = await this.state.loadBookConfig(bookId);
+      const index = [...(await this.state.loadChapterIndex(bookId))];
+      const targetIndex = index.findIndex((chapter) => chapter.number === chapterNumber);
+      if (targetIndex < 0) {
+        throw new Error(`Chapter ${chapterNumber} not found in "${bookId}"`);
+      }
+
+      const targetChapter = index[targetIndex]!;
+      const latestChapter = Math.max(...index.map((entry) => entry.number));
+      const rollbackTarget = chapterNumber - 1;
+
+      try {
+        const discarded = await this.state.rollbackToChapter(bookId, rollbackTarget);
+        return {
+          chapterNumber,
+          rolledBackTo: rollbackTarget,
+          discarded,
+          recoveredByResync: false,
+        };
+      } catch (error) {
+        if (!this.canRecoverRejectedLatestAuditFailedChapter(targetChapter, latestChapter, rollbackTarget, error)) {
+          throw error;
+        }
+
+        const language = await this.resolveBookLanguage(book);
+        this.logWarn(language, {
+          zh: `第${chapterNumber}章驳回缺少第${rollbackTarget}章快照，改为裁掉失败章后重建第${rollbackTarget}章真相文件。`,
+          en: `Rejecting chapter ${chapterNumber} is missing snapshot ${rollbackTarget}; falling back to discard-and-resync recovery.`,
+        });
+
+        const discarded = await this.state.discardChaptersAfter(bookId, rollbackTarget);
+        await this._resyncChapterArtifactsLocked(bookId, rollbackTarget);
+
+        return {
+          chapterNumber,
+          rolledBackTo: rollbackTarget,
+          discarded,
+          recoveredByResync: true,
+        };
+      }
+    } finally {
+      await releaseLock();
+    }
+  }
+
   async syncAfterTruthEdit(bookId: string, editedFile: string): Promise<{
     readonly bookId: string;
     readonly file: string;
@@ -3472,6 +3525,24 @@ ${matrix}`;
       bookDir,
       fallbackChapter: chapterNumber,
     });
+  }
+
+  private canRecoverRejectedLatestAuditFailedChapter(
+    targetChapter: ChapterMeta,
+    latestChapter: number,
+    rollbackTarget: number,
+    error: unknown,
+  ): boolean {
+    if (targetChapter.status !== "audit-failed") {
+      return false;
+    }
+    if (targetChapter.number !== latestChapter) {
+      return false;
+    }
+    if (rollbackTarget <= 0) {
+      return false;
+    }
+    return /Cannot restore snapshot for chapter \d+/.test(String(error));
   }
 
   private async syncNarrativeMemoryIndex(bookId: string): Promise<void> {

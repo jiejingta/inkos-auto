@@ -399,20 +399,15 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const num = parseInt(c.req.param("num"), 10);
 
     try {
-      const index = await state.loadChapterIndex(id);
-      const target = index.find((ch) => ch.number === num);
-      if (!target) {
-        return c.json({ error: `Chapter ${num} not found` }, 404);
-      }
-
-      const rollbackTarget = num - 1;
-      const discarded = await state.rollbackToChapter(id, rollbackTarget);
+      const pipeline = new PipelineRunner(await buildPipelineConfig());
+      const result = await pipeline.rejectChapter(id, num);
       return c.json({
         ok: true,
         chapterNumber: num,
         status: "rejected",
-        rolledBackTo: rollbackTarget,
-        discarded,
+        rolledBackTo: result.rolledBackTo,
+        discarded: result.discarded,
+        recoveredByResync: result.recoveredByResync,
       });
     } catch (e) {
       return c.json({ error: String(e) }, 500);

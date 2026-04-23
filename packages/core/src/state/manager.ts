@@ -504,18 +504,12 @@ export class StateManager {
     targetChapter: number,
   ): Promise<ReadonlyArray<number>> {
     const bookDir = this.bookDir(bookId);
-    const chaptersDir = join(bookDir, "chapters");
     const index = await this.loadChapterIndex(bookId);
 
-    const kept: ChapterMeta[] = [];
-    const discarded: number[] = [];
     const discardedEntries: ChapterMeta[] = [];
 
     for (const entry of index) {
-      if (entry.number <= targetChapter) {
-        kept.push(entry);
-      } else {
-        discarded.push(entry.number);
+      if (entry.number > targetChapter) {
         discardedEntries.push(entry);
       }
     }
@@ -525,6 +519,36 @@ export class StateManager {
       && await this.canRollbackWithoutSnapshotRestore(bookId, targetChapter, discardedEntries);
     if (!restored && !skippedSnapshotRestore) {
       throw new Error(`Cannot restore snapshot for chapter ${targetChapter} in "${bookId}"`);
+    }
+
+    const discarded = await this.discardChaptersAfter(bookId, targetChapter);
+    if (skippedSnapshotRestore) {
+      await bootstrapStructuredStateFromMarkdown({
+        bookDir,
+        fallbackChapter: targetChapter,
+      });
+    }
+
+    return discarded;
+  }
+
+  async discardChaptersAfter(
+    bookId: string,
+    targetChapter: number,
+  ): Promise<ReadonlyArray<number>> {
+    const bookDir = this.bookDir(bookId);
+    const chaptersDir = join(bookDir, "chapters");
+    const index = await this.loadChapterIndex(bookId);
+
+    const kept: ChapterMeta[] = [];
+    const discarded: number[] = [];
+
+    for (const entry of index) {
+      if (entry.number <= targetChapter) {
+        kept.push(entry);
+      } else {
+        discarded.push(entry.number);
+      }
     }
 
     // Delete chapter markdown files for discarded chapters
@@ -596,12 +620,6 @@ export class StateManager {
       rm(join(bookDir, "story", "memory.db-wal"), { force: true }),
     ]);
     await this.discardReviewStage(bookId);
-    if (skippedSnapshotRestore) {
-      await bootstrapStructuredStateFromMarkdown({
-        bookDir,
-        fallbackChapter: targetChapter,
-      });
-    }
 
     await this.saveChapterIndex(bookId, kept);
     return discarded;
