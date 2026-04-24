@@ -10,11 +10,11 @@ import type {
   BookConfig,
   Platform,
 } from "../index.js";
-import { chatCompletion } from "../index.js";
 import { executeEditTransaction } from "./edit-controller.js";
 import type { InteractionRuntimeTools } from "./runtime.js";
 import { normalizeCreationDraft, type BookCreationDraft } from "./session.js";
 import { applyPromptOverridePair } from "../prompts/overrides.js";
+import { tracedChatCompletion } from "../llm/tracing.js";
 
 type PipelineLike = Pick<PipelineRunner, "writeNextChapter" | "reviseDraft"> & {
   readonly initBook?: (
@@ -515,7 +515,7 @@ export function createInteractionToolsFromDeps(
         },
       );
 
-      const response = await chatCompletion(
+      const response = await tracedChatCompletion(
         instrumentedPipeline.config.client,
         instrumentedPipeline.config.model,
         [
@@ -529,6 +529,12 @@ export function createInteractionToolsFromDeps(
           },
         ],
         { temperature: 0.4 },
+        {
+          projectRoot: instrumentedPipeline.config.projectRoot ?? "",
+          agent: "interaction",
+          promptId: "interaction.develop-book-draft",
+          logger: instrumentedPipeline.config.logger,
+        },
       );
 
       const parsed = parseCreationDraftResult(response.content, {
@@ -588,7 +594,7 @@ export function createInteractionToolsFromDeps(
     chat: async (input, options) => {
       const bookLabel = options.bookId ?? "none";
       const chatRequestOptions = hooks?.getChatRequestOptions?.() ?? {};
-      let response: Awaited<ReturnType<typeof chatCompletion>> | undefined;
+      let response: Awaited<ReturnType<typeof tracedChatCompletion>> | undefined;
       if (instrumentedPipeline.config?.client && instrumentedPipeline.config?.model) {
         try {
           const chatSystemPrompt = [
@@ -606,7 +612,7 @@ export function createInteractionToolsFromDeps(
               user: chatUserPrompt,
             },
           );
-          response = await chatCompletion(
+          response = await tracedChatCompletion(
             instrumentedPipeline.config.client,
             instrumentedPipeline.config.model,
             [
@@ -623,6 +629,13 @@ export function createInteractionToolsFromDeps(
               temperature: chatRequestOptions.temperature ?? 0.4,
               ...(chatRequestOptions.maxTokens !== undefined && { maxTokens: chatRequestOptions.maxTokens }),
               onTextDelta: hooks?.onChatTextDelta,
+            },
+            {
+              projectRoot: instrumentedPipeline.config.projectRoot ?? "",
+              bookId: options.bookId,
+              agent: "interaction",
+              promptId: "interaction.chat",
+              logger: instrumentedPipeline.config.logger,
             },
           );
         } catch (err) {

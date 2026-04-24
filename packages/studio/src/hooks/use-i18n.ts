@@ -290,8 +290,13 @@ const strings = {
   "common.exportSuccess": { zh: "已导出到项目目录", en: "Exported to project directory" },
   "common.exportFormat": { zh: "导出格式", en: "Export format" },
   "logs.title": { zh: "日志", en: "Logs" },
+  "logs.systemTab": { zh: "流程日志", en: "Pipeline Logs" },
+  "logs.aiTab": { zh: "AI 原文", en: "AI Raw" },
+  "logs.aiResponse": { zh: "模型返回", en: "Model Response" },
   "logs.empty": { zh: "暂无日志", en: "No log entries yet" },
+  "logs.aiEmpty": { zh: "暂无 AI 原文日志", en: "No AI raw log entries yet" },
   "logs.showingRecent": { zh: "当前展示最近日志记录。", en: "Showing recent log entries." },
+  "logs.showingRecentAi": { zh: "当前展示最近 100 条 AI 原文日志，来源于项目目录下的 inkos-ai.log。", en: "Showing the latest 100 raw AI log entries from inkos-ai.log in the project root." },
 } as const;
 
 export type StringKey = keyof typeof strings;

@@ -1,5 +1,5 @@
 import type { LLMClient, LLMMessage, LLMResponse, OnStreamProgress } from "../llm/provider.js";
-import { chatCompletion } from "../llm/provider.js";
+import { tracedChatCompletion } from "../llm/tracing.js";
 import { applyPromptOverridePair } from "../prompts/overrides.js";
 import { searchWeb, fetchUrl } from "../utils/web-search.js";
 import type { Logger } from "../utils/logger.js";
@@ -15,6 +15,7 @@ export interface AgentContext {
 
 export abstract class BaseAgent {
   protected readonly ctx: AgentContext;
+  private pendingPromptTraceId?: string;
 
   constructor(ctx: AgentContext) {
     this.ctx = ctx;
@@ -28,10 +29,22 @@ export abstract class BaseAgent {
     messages: ReadonlyArray<LLMMessage>,
     options?: { readonly temperature?: number; readonly maxTokens?: number },
   ): Promise<LLMResponse> {
-    return chatCompletion(this.ctx.client, this.ctx.model, messages, {
-      ...options,
-      onStreamProgress: this.ctx.onStreamProgress,
-    });
+    return tracedChatCompletion(
+      this.ctx.client,
+      this.ctx.model,
+      messages,
+      {
+        ...options,
+        onStreamProgress: this.ctx.onStreamProgress,
+      },
+      {
+        projectRoot: this.ctx.projectRoot,
+        bookId: this.ctx.bookId,
+        agent: this.name,
+        promptId: this.takePromptTraceId(),
+        logger: this.ctx.logger,
+      },
+    );
   }
 
   /**
@@ -45,11 +58,23 @@ export abstract class BaseAgent {
   ): Promise<LLMResponse> {
     // OpenAI has native search — use it directly
     if (this.ctx.client.provider === "openai") {
-      return chatCompletion(this.ctx.client, this.ctx.model, messages, {
-        ...options,
-        webSearch: true,
-        onStreamProgress: this.ctx.onStreamProgress,
-      });
+      return tracedChatCompletion(
+        this.ctx.client,
+        this.ctx.model,
+        messages,
+        {
+          ...options,
+          webSearch: true,
+          onStreamProgress: this.ctx.onStreamProgress,
+        },
+        {
+          projectRoot: this.ctx.projectRoot,
+          bookId: this.ctx.bookId,
+          agent: this.name,
+          promptId: this.takePromptTraceId(),
+          logger: this.ctx.logger,
+        },
+      );
     }
 
     // Other providers: self-hosted search → inject results into prompt
@@ -107,7 +132,14 @@ export abstract class BaseAgent {
     readonly system?: string;
     readonly user?: string;
   }> {
+    this.pendingPromptTraceId = promptId;
     return applyPromptOverridePair(this.ctx.projectRoot, promptId, prompts);
+  }
+
+  private takePromptTraceId(): string | undefined {
+    const promptId = this.pendingPromptTraceId;
+    this.pendingPromptTraceId = undefined;
+    return promptId;
   }
 
   abstract get name(): string;

@@ -176,6 +176,89 @@ describe("ContinuityAuditor", () => {
     }
   });
 
+  it("distinguishes official pre-truth from candidate post-truth in audit prompts", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-auditor-truth-context-test-"));
+    const bookDir = join(root, "book");
+    const storyDir = join(bookDir, "story");
+    await mkdir(storyDir, { recursive: true });
+
+    await Promise.all([
+      writeFile(join(storyDir, "current_state.md"), "# 当前状态卡\n\n- 旧状态。\n", "utf-8"),
+      writeFile(join(storyDir, "pending_hooks.md"), "# 伏笔池\n", "utf-8"),
+      writeFile(join(storyDir, "chapter_summaries.md"), "# 章节摘要\n", "utf-8"),
+      writeFile(join(storyDir, "subplot_board.md"), "# 支线进度板\n", "utf-8"),
+      writeFile(join(storyDir, "emotional_arcs.md"), "# 情感弧线\n", "utf-8"),
+      writeFile(join(storyDir, "character_matrix.md"), "# 角色交互矩阵\n", "utf-8"),
+      writeFile(join(storyDir, "volume_outline.md"), "# 卷纲\n\n## 第2章\n推进夜间实验。\n", "utf-8"),
+      writeFile(join(storyDir, "style_guide.md"), "# 文风指南\n\n- 保持克制。\n", "utf-8"),
+    ]);
+
+    const auditor = new ContinuityAuditor({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0, maxTokensCap: null,
+          extra: {},
+        },
+      },
+      model: "test-model",
+      projectRoot: root,
+    });
+
+    const chatSpy = vi.spyOn(ContinuityAuditor.prototype as never, "chat" as never).mockResolvedValue({
+      content: JSON.stringify({
+        passed: true,
+        issues: [],
+        summary: "ok",
+      }),
+      usage: ZERO_USAGE,
+    });
+
+    try {
+      await auditor.auditChapter(
+        bookDir,
+        "林远把滤液端到窗边，确认手指再次透明。",
+        2,
+        "xuanhuan",
+        {
+          truthContext: {
+            official: {
+              currentState: "# 当前状态卡\n\n- 转生第0天傍晚，过滤刚开始。\n",
+            },
+            candidate: {
+              currentState: "# 当前状态卡\n\n- 转生第0天夜间，第一次透明化已出现。\n",
+              hooks: "# 伏笔池\n\n- 透明化开始具象。\n",
+            },
+          },
+          continuityPack: {
+            previousChapterFullText: "# 第1章\n\n夕阳落下时，过滤已经开始。",
+            nextChapterOpening: "天刚亮，他先去看昨晚晾着的滤灰。",
+            chapterTrail: "# 章节摘要\n\n| 1 | 夕阳滤灰 | 林远开始过滤 | 透明化初兆 | 无 | 透明化伏笔种下 | 压抑 | 过渡 |\n| 2 | 草木灰与透明手指 | 夜间实验推进 | 第一次透明化具象 | 无 | 透明化升级 | 紧绷 | 发现 |\n| 3 | 晨灰 | 次日清晨验证残留 | 机制进一步明确 | 无 | 透明化代价升级 | 冷峻 | 验证 |\n",
+          },
+        },
+      );
+
+      const messages = chatSpy.mock.calls[0]?.[0] as
+        | ReadonlyArray<{ content: string }>
+        | undefined;
+      const systemPrompt = messages?.[0]?.content ?? "";
+      const userPrompt = messages?.[1]?.content ?? "";
+
+      expect(systemPrompt).toContain("候选章后 truth");
+      expect(systemPrompt).toContain("存在 6 个或更多普通 warning");
+      expect(userPrompt).toContain("## 官方章前状态卡");
+      expect(userPrompt).toContain("## 候选章后状态卡");
+      expect(userPrompt).toContain("## 邻近章节轨迹（N-3..N+1）");
+      expect(userPrompt).toContain("## 下一章开头（若已存在，避免回写冲突）");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("uses selected summary and hook evidence instead of full long-history markdown in governed mode", async () => {
     const root = await mkdtemp(join(tmpdir(), "inkos-auditor-test-"));
     const bookDir = join(root, "book");

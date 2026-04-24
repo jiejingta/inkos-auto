@@ -4,6 +4,8 @@ dist/
 .env.local
 .npmrc
 *.tgz
+inkos.log
+inkos-ai.log
 .DS_Store
 coverage/
 .turbo/

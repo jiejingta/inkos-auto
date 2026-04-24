@@ -113,6 +113,7 @@ vi.mock("@jiejingtazhu/inkos-core", () => {
     Scheduler: MockScheduler,
     createLLMClient: createLLMClientMock,
     createLogger: vi.fn(() => logger),
+    createJsonLineSink: vi.fn(() => ({ write: vi.fn() })),
     computeAnalytics: vi.fn(() => ({})),
     chatCompletion: chatCompletionMock,
     loadProjectConfig: loadProjectConfigMock,
@@ -767,6 +768,26 @@ describe("createStudioServer daemon lifecycle", () => {
     expect(response.status).toBe(200);
     expect(pipelineConfigs.at(-1)).toMatchObject({ externalContext: "以师债线为准同步状态。" });
     expect(resyncChapterArtifactsMock).toHaveBeenCalledWith("demo-book", 3);
+  });
+
+  it("serves raw AI logs from inkos-ai.log", async () => {
+    await writeFile(join(root, "inkos-ai.log"), [
+      JSON.stringify({ phase: "request", agent: "writer", promptId: "writer.creative-draft" }),
+      JSON.stringify({ phase: "response", agent: "writer", content: "raw output" }),
+    ].join("\n"), "utf-8");
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/ai-logs");
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      entries: [
+        { phase: "request", agent: "writer", promptId: "writer.creative-draft" },
+        { phase: "response", agent: "writer", content: "raw output" },
+      ],
+    });
   });
 
   it("routes export-save through the shared structured interaction runtime", async () => {

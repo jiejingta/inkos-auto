@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { runChapterReviewCycle } from "../pipeline/chapter-review-cycle.js";
 import type { AuditResult, AuditIssue } from "../agents/continuity.js";
 import type { LengthSpec } from "../models/length-governance.js";
+import type { PostWriteViolation } from "../agents/post-write-validator.js";
 
 const LENGTH_SPEC: LengthSpec = {
   target: 220,
@@ -28,6 +29,48 @@ function createAuditResult(overrides?: Partial<AuditResult>): AuditResult {
   };
 }
 
+function createInitialOutput(
+  overrides?: Partial<{
+    title: string;
+    content: string;
+    wordCount: number;
+    postWriteErrors: ReadonlyArray<PostWriteViolation>;
+    updatedState: string;
+    updatedLedger: string;
+    updatedHooks: string;
+  }>,
+) {
+  return {
+    title: "Draft Title",
+    content: "raw draft",
+    wordCount: 9,
+    postWriteErrors: [] as ReadonlyArray<PostWriteViolation>,
+    updatedState: "state: raw",
+    updatedLedger: "ledger: raw",
+    updatedHooks: "hooks: raw",
+    ...overrides,
+  };
+}
+
+function createSettledOutput(
+  content: string,
+  overrides?: Partial<{
+    updatedState: string;
+    updatedLedger: string;
+    updatedHooks: string;
+  }>,
+) {
+  return {
+    content,
+    wordCount: content.length,
+    updatedState: `state: ${content}`,
+    updatedLedger: `ledger: ${content}`,
+    updatedHooks: `hooks: ${content}`,
+    tokenUsage: ZERO_USAGE,
+    ...overrides,
+  };
+}
+
 describe("runChapterReviewCycle", () => {
   it("applies post-write spot-fix before the first audit pass", async () => {
     const auditChapter = vi.fn()
@@ -48,24 +91,26 @@ describe("runChapterReviewCycle", () => {
         applied: false,
         tokenUsage: ZERO_USAGE,
       });
+    const resettleChapterState = vi.fn().mockResolvedValue(
+      createSettledOutput("fixed draft"),
+    );
 
     const result = await runChapterReviewCycle({
       book: { genre: "xuanhuan" },
       bookDir: "/tmp/book",
       chapterNumber: 1,
-      initialOutput: {
-        content: "raw draft",
-        wordCount: 9,
+      initialOutput: createInitialOutput({
         postWriteErrors: [{
           rule: "paragraph-shape",
           description: "too fragmented",
           suggestion: "merge short fragments",
           severity: "error",
         }],
-      },
+      }),
       lengthSpec: LENGTH_SPEC,
       reducedControlInput: undefined,
       initialUsage: ZERO_USAGE,
+      resettleChapterState,
       createReviser: () => ({ reviseChapter }),
       auditor: { auditChapter },
       normalizeDraftLengthIfNeeded,
@@ -89,8 +134,18 @@ describe("runChapterReviewCycle", () => {
       "fixed draft",
       1,
       "xuanhuan",
-      undefined,
+      {
+        truthContext: {
+          candidate: {
+            currentState: "state: fixed draft",
+            ledger: "ledger: fixed draft",
+            hooks: "hooks: fixed draft",
+          },
+        },
+      },
     );
+    expect(resettleChapterState).toHaveBeenCalledTimes(1);
+    expect(resettleChapterState).toHaveBeenCalledWith("fixed draft");
     expect(result.finalContent).toBe("fixed draft");
     expect(result.revised).toBe(true);
   });
@@ -136,19 +191,25 @@ describe("runChapterReviewCycle", () => {
         ? [{ severity: "warning", category: "ai", description: "more ai", suggestion: "reduce" } satisfies AuditIssue]
         : [],
     }));
+    const resettleChapterState = vi.fn().mockResolvedValue(
+      createSettledOutput("rewritten draft"),
+    );
 
     const result = await runChapterReviewCycle({
       book: { genre: "xuanhuan" },
       bookDir: "/tmp/book",
       chapterNumber: 1,
-      initialOutput: {
+      initialOutput: createInitialOutput({
         content: "original draft",
         wordCount: 13,
-        postWriteErrors: [],
-      },
+        updatedState: "state: original",
+        updatedLedger: "ledger: original",
+        updatedHooks: "hooks: original",
+      }),
       lengthSpec: LENGTH_SPEC,
       reducedControlInput: undefined,
       initialUsage: ZERO_USAGE,
+      resettleChapterState,
       createReviser: () => ({ reviseChapter }),
       auditor: { auditChapter },
       normalizeDraftLengthIfNeeded,
@@ -166,8 +227,40 @@ describe("runChapterReviewCycle", () => {
     });
 
     expect(reviseChapter).toHaveBeenCalledTimes(1);
-    expect(auditChapter).toHaveBeenNthCalledWith(1, "/tmp/book", "original draft", 1, "xuanhuan", undefined);
-    expect(auditChapter).toHaveBeenNthCalledWith(2, "/tmp/book", "original draft", 1, "xuanhuan", { temperature: 0 });
+    expect(auditChapter).toHaveBeenNthCalledWith(
+      1,
+      "/tmp/book",
+      "original draft",
+      1,
+      "xuanhuan",
+      {
+        truthContext: {
+          candidate: {
+            currentState: "state: original",
+            ledger: "ledger: original",
+            hooks: "hooks: original",
+          },
+        },
+      },
+    );
+    expect(auditChapter).toHaveBeenNthCalledWith(
+      2,
+      "/tmp/book",
+      "original draft",
+      1,
+      "xuanhuan",
+      {
+        temperature: 0,
+        truthContext: {
+          candidate: {
+            currentState: "state: original",
+            ledger: "ledger: original",
+            hooks: "hooks: original",
+          },
+        },
+      },
+    );
+    expect(resettleChapterState).not.toHaveBeenCalled();
     expect(result.finalContent).toBe("original draft");
     expect(result.revised).toBe(false);
   });
@@ -208,19 +301,25 @@ describe("runChapterReviewCycle", () => {
         applied: false,
         tokenUsage: ZERO_USAGE,
       });
+    const resettleChapterState = vi.fn().mockResolvedValue(
+      createSettledOutput("repaired draft"),
+    );
 
     const result = await runChapterReviewCycle({
       book: { genre: "xuanhuan" },
       bookDir: "/tmp/book",
       chapterNumber: 1,
-      initialOutput: {
+      initialOutput: createInitialOutput({
         content: "original draft",
         wordCount: 13,
-        postWriteErrors: [],
-      },
+        updatedState: "state: original",
+        updatedLedger: "ledger: original",
+        updatedHooks: "hooks: original",
+      }),
       lengthSpec: LENGTH_SPEC,
       reducedControlInput: undefined,
       initialUsage: ZERO_USAGE,
+      resettleChapterState,
       createReviser: () => ({ reviseChapter }),
       auditor: { auditChapter },
       normalizeDraftLengthIfNeeded,
@@ -247,11 +346,37 @@ describe("runChapterReviewCycle", () => {
       "xuanhuan",
       {
         lengthSpec: LENGTH_SPEC,
+        truthContext: {
+          candidate: {
+            currentState: "state: original",
+            ledger: "ledger: original",
+            hooks: "hooks: original",
+          },
+        },
       },
     );
     expect(result.finalContent).toBe("repaired draft");
     expect(result.revised).toBe(true);
     expect(result.auditResult.passed).toBe(true);
+    expect(resettleChapterState).toHaveBeenCalledTimes(1);
+    expect(resettleChapterState).toHaveBeenCalledWith("repaired draft");
+    expect(auditChapter).toHaveBeenNthCalledWith(
+      2,
+      "/tmp/book",
+      "repaired draft",
+      1,
+      "xuanhuan",
+      {
+        temperature: 0,
+        truthContext: {
+          candidate: {
+            currentState: "state: repaired draft",
+            ledger: "ledger: repaired draft",
+            hooks: "hooks: repaired draft",
+          },
+        },
+      },
+    );
   });
 
   it("escalates structural audit failures beyond spot-fix during the inline review cycle", async () => {
@@ -298,19 +423,25 @@ describe("runChapterReviewCycle", () => {
         applied: false,
         tokenUsage: ZERO_USAGE,
       });
+    const resettleChapterState = vi.fn().mockResolvedValue(
+      createSettledOutput("rebuilt draft"),
+    );
 
     await runChapterReviewCycle({
       book: { genre: "xuanhuan" },
       bookDir: "/tmp/book",
       chapterNumber: 1,
-      initialOutput: {
+      initialOutput: createInitialOutput({
         content: "original draft",
         wordCount: 13,
-        postWriteErrors: [],
-      },
+        updatedState: "state: original",
+        updatedLedger: "ledger: original",
+        updatedHooks: "hooks: original",
+      }),
       lengthSpec: LENGTH_SPEC,
       reducedControlInput: undefined,
       initialUsage: ZERO_USAGE,
+      resettleChapterState,
       createReviser: () => ({ reviseChapter }),
       auditor: { auditChapter },
       normalizeDraftLengthIfNeeded,
@@ -336,6 +467,13 @@ describe("runChapterReviewCycle", () => {
       "xuanhuan",
       {
         lengthSpec: LENGTH_SPEC,
+        truthContext: {
+          candidate: {
+            currentState: "state: original",
+            ledger: "ledger: original",
+            hooks: "hooks: original",
+          },
+        },
       },
     );
   });

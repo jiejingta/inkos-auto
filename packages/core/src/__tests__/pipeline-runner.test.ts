@@ -269,6 +269,26 @@ describe("PipelineRunner", () => {
         tokenUsage: ZERO_USAGE,
       }),
     );
+    vi.spyOn(WriterAgent.prototype, "settleChapterState").mockImplementation(
+      async (input) => createWriterOutput({
+        chapterNumber: input.chapterNumber,
+        title: input.title,
+        content: input.content,
+        wordCount: countChapterLength(
+          input.content,
+          input.book.language === "en" ? "en_words" : "zh_chars",
+        ),
+        updatedState: createStateCard({
+          chapter: input.chapterNumber,
+          location: "Settled test location",
+          protagonistState: `Settled state for chapter ${input.chapterNumber}.`,
+          goal: "Hold the line.",
+          conflict: "Pressure remains unresolved.",
+        }),
+        updatedLedger: "settled ledger",
+        updatedHooks: "# Pending Hooks\n",
+      }),
+    );
     vi.spyOn(StateValidatorAgent.prototype, "validate").mockResolvedValue({
       warnings: [],
       passed: true,
@@ -4203,6 +4223,16 @@ describe("PipelineRunner", () => {
         updatedHooks: "# Pending Hooks\n",
       }),
     );
+    vi.spyOn(WriterAgent.prototype, "settleChapterState").mockResolvedValueOnce(
+      createWriterOutput({
+        chapterNumber: 1,
+        title: "Test Chapter",
+        content: "Revised body.",
+        wordCount: "Revised body.".length,
+        updatedState: revisedState,
+        updatedHooks: "# Pending Hooks\n",
+      }),
+    );
 
     try {
       await runner.reviseDraft(bookId, 1);
@@ -5003,28 +5033,20 @@ describe("PipelineRunner", () => {
     }
   });
 
-  it("re-audits revisions against updated state overrides instead of stale on-disk truth files", async () => {
+  it("uses staged truth when pre-auditing an audit-failed chapter for manual revision", async () => {
     const { root, runner, state, bookId } = await createRunnerFixture();
-    const storyDir = join(state.bookDir(bookId), "story");
-    const chaptersDir = join(state.bookDir(bookId), "chapters");
-    const originalBody = "Taryn kept one hand on the annexe key and listened at the door.";
-    const revisedBody = `${originalBody}\n\nHe checked the seal again before he moved.`;
-
-    await state.saveBookConfig(bookId, {
-      ...(await state.loadBookConfig(bookId)),
-      platform: "other",
-      genre: "progression",
-      language: "en",
-      chapterWordCount: 1800,
-    });
+    const bookDir = state.bookDir(bookId);
+    const storyDir = join(bookDir, "story");
+    const chaptersDir = join(bookDir, "chapters");
+    const originalBody = "Taryn waited at the annexe door.";
 
     await Promise.all([
-      writeFile(join(chaptersDir, "0001_First.md"), `# Chapter 1: First\n\nOpening chapter.`, "utf-8"),
+      writeFile(join(chaptersDir, "0001_First.md"), "# Chapter 1: First\n\nOpening chapter.", "utf-8"),
       writeFile(join(chaptersDir, "0002_Test_Chapter.md"), `# Chapter 2: Test Chapter\n\n${originalBody}`, "utf-8"),
       writeFile(join(storyDir, "current_state.md"), createStateCard({
         chapter: 1,
         location: "Orsden archive lower hall",
-        protagonistState: "Taryn is still moving under Renn's first warning.",
+        protagonistState: "Taryn is still below the annexe.",
         goal: "Reach the annexe.",
         conflict: "The archive is already compromised.",
       }), "utf-8"),
@@ -5052,10 +5074,108 @@ describe("PipelineRunner", () => {
         lengthWarnings: [],
       },
     ]);
+    const stageBookDir = await state.resetReviewStage(bookId, 2);
+    const stageStoryDir = join(stageBookDir, "story");
+    await mkdir(stageStoryDir, { recursive: true });
+    await Promise.all([
+      writeFile(join(stageStoryDir, "current_state.md"), createStateCard({
+        chapter: 2,
+        location: "East annexe corridor",
+        protagonistState: "Taryn is already at the annexe door in the failed draft.",
+        goal: "Open the annexe before the cart clears the court.",
+        conflict: "A forged key has turned lawful access into a trap.",
+      }), "utf-8"),
+      writeFile(join(stageStoryDir, "pending_hooks.md"), "# Pending Hooks\n| annexe-key | open |\n", "utf-8"),
+    ]);
 
     const auditChapter = vi.spyOn(ContinuityAuditor.prototype, "auditChapter")
-      .mockResolvedValueOnce(
-        createAuditResult({
+      .mockImplementation(async (_bookDir, _chapterContent, _chapterNumber, _genre, options) => {
+        const stagedState = (options as { truthContext?: { candidate?: { currentState?: string } } } | undefined)
+          ?.truthContext?.candidate?.currentState;
+        expect(stagedState).toContain("| Current Chapter | 2 |");
+        return createAuditResult({ passed: true, issues: [], summary: "clean" });
+      });
+
+    try {
+      const result = await runner.reviseDraft(bookId, 2);
+
+      expect(auditChapter).toHaveBeenCalledTimes(1);
+      expect(result.applied).toBe(false);
+      expect(result.status).toBe("unchanged");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("re-audits revisions against re-settled truth instead of stale or reviser-supplied state", async () => {
+    const { root, runner, state, bookId } = await createRunnerFixture();
+    const storyDir = join(state.bookDir(bookId), "story");
+    const chaptersDir = join(state.bookDir(bookId), "chapters");
+    const originalBody = "Taryn kept one hand on the annexe key and listened at the door.";
+    const revisedBody = `${originalBody}\n\nHe checked the seal again before he moved.`;
+
+    await state.saveBookConfig(bookId, {
+      ...(await state.loadBookConfig(bookId)),
+      platform: "other",
+      genre: "progression",
+      language: "en",
+      chapterWordCount: 1800,
+    });
+
+    await Promise.all([
+      writeFile(join(chaptersDir, "0001_First.md"), `# Chapter 1: First\n\nOpening chapter.`, "utf-8"),
+      writeFile(join(chaptersDir, "0002_Test_Chapter.md"), `# Chapter 2: Test Chapter\n\n${originalBody}`, "utf-8"),
+      writeFile(join(storyDir, "current_state.md"), createStateCard({
+        chapter: 1,
+        location: "Orsden archive lower hall",
+        protagonistState: "Taryn is still moving under Renn's first warning.",
+        goal: "Reach the annexe.",
+        conflict: "The archive is already compromised.",
+      }), "utf-8"),
+      writeFile(join(storyDir, "pending_hooks.md"), "# Pending Hooks\n", "utf-8"),
+    ]);
+    const stageBookDir = await state.resetReviewStage(bookId, 2);
+    const stageStoryDir = join(stageBookDir, "story");
+    await mkdir(stageStoryDir, { recursive: true });
+    await Promise.all([
+      writeFile(join(stageStoryDir, "current_state.md"), createStateCard({
+        chapter: 2,
+        location: "East annexe threshold",
+        protagonistState: "Staged candidate truth from the previously failed audit.",
+        goal: "Open the annexe before the cart clears the court.",
+        conflict: "A forged key has turned lawful access into a trap.",
+      }), "utf-8"),
+      writeFile(join(stageStoryDir, "pending_hooks.md"), "# Pending Hooks\n| annexe-key | open |\n", "utf-8"),
+    ]);
+    await state.saveChapterIndex(bookId, [
+      {
+        number: 1,
+        title: "First",
+        status: "ready-for-review",
+        wordCount: countChapterLength("Opening chapter.", "en_words"),
+        createdAt: "2026-03-19T00:00:00.000Z",
+        updatedAt: "2026-03-19T00:00:00.000Z",
+        auditIssues: [],
+        lengthWarnings: [],
+      },
+      {
+        number: 2,
+        title: "Test Chapter",
+        status: "audit-failed",
+        wordCount: countChapterLength(originalBody, "en_words"),
+        createdAt: "2026-03-19T00:00:00.000Z",
+        updatedAt: "2026-03-19T00:00:00.000Z",
+        auditIssues: [],
+        lengthWarnings: [],
+      },
+    ]);
+
+    const auditChapter = vi.spyOn(ContinuityAuditor.prototype, "auditChapter")
+      .mockImplementationOnce(async (_bookDir, _chapterContent, _chapterNumber, _genre, options) => {
+        const stagedState = (options as { truthContext?: { candidate?: { currentState?: string } } } | undefined)
+          ?.truthContext?.candidate?.currentState;
+        expect(stagedState).toContain("Staged candidate truth");
+        return createAuditResult({
           passed: false,
           issues: [{
             severity: "warning",
@@ -5064,11 +5184,11 @@ describe("PipelineRunner", () => {
             suggestion: "Tighten the closing move.",
           }],
           summary: "needs revision",
-        }),
-      )
+        });
+      })
       .mockImplementationOnce(async (_bookDir, _chapterContent, chapterNumber, _genre, options) => {
-        const overrideState = (options as { truthFileOverrides?: { currentState?: string } } | undefined)
-          ?.truthFileOverrides?.currentState;
+        const overrideState = (options as { truthContext?: { candidate?: { currentState?: string } } } | undefined)
+          ?.truthContext?.candidate?.currentState;
         if (chapterNumber === 2 && overrideState?.includes("| Current Chapter | 2 |")) {
           return createAuditResult({
             passed: true,
@@ -5089,11 +5209,27 @@ describe("PipelineRunner", () => {
         });
       });
 
-    vi.spyOn(ReviserAgent.prototype, "reviseChapter").mockResolvedValue(
+    const reviseChapter = vi.spyOn(ReviserAgent.prototype, "reviseChapter").mockResolvedValue(
       createReviseOutput({
         revisedContent: revisedBody,
         wordCount: countChapterLength(revisedBody, "en_words"),
         fixedIssues: ["- Synced the annexe beat and tightened the ending."],
+        updatedState: createStateCard({
+          chapter: 1,
+          location: "Orsden archive lower hall",
+          protagonistState: "Stale reviser state that should not be trusted.",
+          goal: "Reach the annexe.",
+          conflict: "The archive is already compromised.",
+        }),
+        updatedHooks: "# Pending Hooks\n",
+      }),
+    );
+    vi.spyOn(WriterAgent.prototype, "settleChapterState").mockResolvedValueOnce(
+      createWriterOutput({
+        chapterNumber: 2,
+        title: "Test Chapter",
+        content: revisedBody,
+        wordCount: countChapterLength(revisedBody, "en_words"),
         updatedState: createStateCard({
           chapter: 2,
           location: "East annexe corridor",
@@ -5110,6 +5246,11 @@ describe("PipelineRunner", () => {
       const savedIndex = await state.loadChapterIndex(bookId);
 
       expect(auditChapter).toHaveBeenCalledTimes(2);
+      const reviseOptions = reviseChapter.mock.calls[0]?.[6] as
+        | { truthContext?: { candidate?: { currentState?: string } } }
+        | undefined;
+      expect(reviseOptions?.truthContext?.candidate?.currentState).toContain("Staged candidate truth");
+      expect(WriterAgent.prototype.settleChapterState).toHaveBeenCalled();
       expect(result.applied).toBe(true);
       expect(result.status).toBe("ready-for-review");
       expect(savedIndex[1]?.status).toBe("ready-for-review");

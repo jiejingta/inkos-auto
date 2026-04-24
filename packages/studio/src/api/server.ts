@@ -20,7 +20,7 @@ import {
   type LogSink,
   type LogEntry,
 } from "@jiejingtazhu/inkos-core";
-import { access, readFile, readdir } from "node:fs/promises";
+import { access, appendFile, readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { isSafeBookId } from "./safety.js";
 import { ApiError } from "./errors.js";
@@ -44,6 +44,8 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
   const app = new Hono();
   const state = new StateManager(root);
   let cachedConfig = initialConfig;
+  void appendFile(join(root, "inkos.log"), "", "utf-8");
+  void appendFile(join(root, "inkos-ai.log"), "", "utf-8");
 
   app.use("/*", cors());
 
@@ -80,6 +82,15 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       broadcast("log", { level: entry.level, tag: entry.tag, message: entry.message });
     },
   };
+  const fileSink: LogSink = {
+    write(entry: LogEntry): void {
+      void appendFile(
+        join(root, "inkos.log"),
+        `${JSON.stringify(entry)}\n`,
+        "utf-8",
+      );
+    },
+  };
 
   async function loadCurrentProjectConfig(
     options?: { readonly requireApiKey?: boolean },
@@ -93,7 +104,10 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     overrides?: Partial<Pick<PipelineConfig, "externalContext">>,
   ): Promise<PipelineConfig> {
     const currentConfig = await loadCurrentProjectConfig();
-    const logger = createLogger({ tag: "studio", sinks: [sseSink] });
+    const logger = createLogger({
+      tag: "studio",
+      sinks: [sseSink, fileSink],
+    });
     return {
       client: createLLMClient(currentConfig.llm),
       model: currentConfig.llm.model,
@@ -600,6 +614,20 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       const lines = content.trim().split("\n").slice(-100);
       const entries = lines.map((line) => {
         try { return JSON.parse(line); } catch { return { message: line }; }
+      });
+      return c.json({ entries });
+    } catch {
+      return c.json({ entries: [] });
+    }
+  });
+
+  app.get("/api/ai-logs", async (c) => {
+    const logPath = join(root, "inkos-ai.log");
+    try {
+      const content = await readFile(logPath, "utf-8");
+      const lines = content.trim().split("\n").slice(-100);
+      const entries = lines.map((line) => {
+        try { return JSON.parse(line); } catch { return { raw: line }; }
       });
       return c.json({ entries });
     } catch {

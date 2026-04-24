@@ -1,8 +1,9 @@
-import { chatWithTools, type AgentMessage, type ToolDefinition } from "../llm/provider.js";
+import type { AgentMessage, ToolDefinition } from "../llm/provider.js";
 import { PipelineRunner, type PipelineConfig } from "./runner.js";
 import type { Platform, Genre } from "../models/book.js";
 import { DEFAULT_REVISE_MODE, type ReviseMode } from "../agents/reviser.js";
 import { applyPromptOverridePair } from "../prompts/overrides.js";
+import { tracedChatWithTools } from "../llm/tracing.js";
 
 /** Tool definitions for the agent loop. */
 const TOOLS: ReadonlyArray<ToolDefinition> = [
@@ -315,7 +316,12 @@ export async function runAgentLoop(
   let lastAssistantMessage = "";
 
   for (let turn = 0; turn < maxTurns; turn++) {
-    const result = await chatWithTools(config.client, config.model, messages, TOOLS);
+    const result = await tracedChatWithTools(config.client, config.model, messages, TOOLS, undefined, {
+      projectRoot: config.projectRoot,
+      agent: "pipeline-agent",
+      promptId: "pipeline.agent-loop",
+      logger: config.logger,
+    });
 
     // Push assistant message to history
     messages.push({

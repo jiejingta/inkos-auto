@@ -75,6 +75,8 @@
 补充说明：
 
 - 审计问题现在统一落盘为 `"[severity] category: description"` 格式，便于统计、重复警告判定和后续排查。
+- `write next` 的前向审计现在不再只看磁盘里的旧 `current_state.md`。review cycle 会把本章正文重新 settle 后的候选 truth 一并送进 auditor，并在 prompt 里显式区分“官方章前 truth”和“候选章后 truth”，避免把章末状态误当成章初状态。
+- 手动 `reviseDraft` 修订 `audit-failed` 章节时，会优先读取 `.review-staging/chapter-XXXX/story/*` 里的候选 truth 作为章后真相，再做修订前审计；没有 staged truth 时才退回只读正式 `story/*`。
 - `write next` 的审计失败后，不再只对 `critical` 自动修；只要是阻断性 `warning` / `critical`，都会尝试进入一次自动修订。
 - 自动修订不再永远死锁在 `spot-fix`：如果命中 `大纲偏离检测`、`读者期待管理`、世界规则漂移、时间线矛盾、角色动机/关系连续性断裂等结构性问题，会自动升级到 `rework`；若同一章连续失败已到 4 次，或同时出现多个结构性 `critical`，会直接升级到 `rewrite`。
 - 多模型路由里，运行时实际识别的章节审计和修订键名是 `auditor` 与 `reviser`。无人值守场景推荐把两者拆开：`auditor` 用更严格、更稳定的审计模型，`reviser` 用更强的长文改写模型。
@@ -88,6 +90,7 @@
 - `packages/core/src/prompts/overrides.ts`
 - `packages/studio/src/pages/PromptManager.tsx`
 - `packages/studio/src/api/server.ts`
+- `packages/core/src/llm/tracing.ts`
 
 当前实现下，InkOS 里真正发给模型的主要 prompt 入口，已经被整理成一份可读目录，并暴露给 Studio 页面：
 
@@ -111,6 +114,32 @@ override 的持久化位置：
 
 - 当前覆盖是“项目级”的，不是全局配置。
 - 页面展示的是当前代码里真实使用的 prompt 入口，不是随便手填的一份文档清单。
+
+### 2.4 日志现在分成“流程日志”和“AI 原文日志”
+
+代码入口：
+
+- `packages/cli/src/commands/daemon.ts`
+- `packages/studio/src/api/server.ts`
+- `packages/core/src/llm/tracing.ts`
+
+当前实现：
+
+- CLI `inkos up` 和 Studio 内触发的守护/写作流程，都会把结构化流程日志追加到项目根目录 `inkos.log`
+- 所有已接入 tracing 的 LLM 环节，都会把原始 request / response / error 追加到项目根目录 `inkos-ai.log`
+- `inkos-ai.log` 采用 JSON Lines；每条记录会带上 `phase`、`agent`、`promptId`、`bookId`、`messages`、`content`、`error`
+- Studio 的“日志”页现在分成两个标签：
+  - `流程日志`：读取 `/api/logs` → `inkos.log`
+  - `AI 原文`：读取 `/api/ai-logs` → `inkos-ai.log`
+
+当前已经接入 raw trace 的主要路径：
+
+- 所有基于 `BaseAgent` 的 writer / auditor / reviser / title-refiner / chapter-analyzer 等 agent
+- `interaction.develop-book-draft`
+- `interaction.chat`
+- `pipeline.style-guide`
+- `pipeline.parent-canon`
+- `pipeline.agent-loop`
 
 ## 3. 核心流程图谱
 
@@ -140,6 +169,9 @@ override 的持久化位置：
 - `particle_ledger.md` 现在有“失管检测”。当账本长期停留在初始化/占位状态，而当前题材又启用了数值体系时，流水线会优先复用本次 settle 或 final analyzer 已经产出的账本结果来修复；只有仍拿不到有效账本时，才额外回退到一次 analyzer 重建，尽量减少 API 调用。
 - `chapter_summaries.md` 的写入现在额外做“当前章节摘要补写”。即使本次状态结算走的是结构化 runtime delta，也会用 delta 渲染当前章摘要并按章节号去重追加，避免长篇运行后摘要表只停在早期章节。
 - `write sync` / 写前自愈现在会检测辅助真相文件缺口：如果 `chapter_summaries.md` 或 `story/state/chapter_summaries.json` 少了历史章节，或者 `emotional_arcs.md` 长期停在早期章节，会复用 `chapter-analyzer` 按缺失章节逐章回填；同一轮分析会同时补摘要和情绪弧线，避免为两个文件重复调用模型。
+- Reviser / Auditor 现在共享一份“多章连续性包”：默认会带 `N-1` 全文、若存在则带 `N+1` 开头片段，再附上 `N-3..N+1` 的章节摘要轨迹。目的不是只修上一章衔接，而是同时防止把已存在后文的事实回写坏。
+- Reviser 在自动修订和手动修订时也会收到 truth context：正式 `story/*` 是“章前官方真相”，候选 settled truth 或 staged truth 是“章后修订目标”。提示词会明确要求模型不要把候选章后状态当成章节开头事实。
+- 只要正文在审计链路里被改过（spot-fix / rewrite / rework / 最后一轮本地阻断修补），runner 都会先对“改后的正文”重新 settle truth，再进入下一轮 audit 或持久化，避免正文和候选 state/hooks/ledger 半同步。
 - Studio 的 Truth Files 页面保存后，不再只是覆盖 `story/*.md` 文件；现在会按文件类型触发本地零额外模型调用的后续同步，例如叙事记忆索引、结构化状态镜像、`current_state` 事实历史和最新章节快照。
 - 最终正文在落盘前会再跑一轮本地阻断校验：如果修订后又引入了“第X章”元叙事、角色讨论自己处在第几章、禁用句式等硬错误，会触发一次额外的 spot-fix，并重新合并审计结果，避免这类错误直接漏进正式章节。
 - 章节正文文件在落盘前会清洗顶部残留 heading。无论是写新章、修订章节还是批量重命名，都会先剥掉正文里残留的旧标题，再统一写入新的正式标题，避免出现“双标题”开头。
@@ -170,13 +202,15 @@ override 的持久化位置：
 - `packages/core/src/agents/planner.ts`
   - 负责常规章节规划；但 `current_focus.md` 的自动刷新本身已经不再额外调用 planner。
 - `packages/core/src/pipeline/chapter-review-cycle.ts`
-  - 控制“先审、失败则修、修后再审”的自动循环。
+  - 控制“先审、失败则修、修后再审”的自动循环；现在会在正文变化后重新 settle 候选 truth，并把它作为章后 truth 传给 auditor。
 - `packages/core/src/pipeline/revision-strategy.ts`
   - 根据问题类型和连续失败次数，决定该用 `spot-fix`、`rework` 还是 `rewrite`。
 - `packages/core/src/pipeline/scheduler.ts`
   - `inkos up` 的自动推进规则在这里。
 - `packages/core/src/pipeline/runner.ts`
-  - 单章完整流水线、手动 `auditDraft` / `reviseDraft` / `writeNextChapter` 的主入口；同时负责“已批准章节但 truth files 落后”的写前自愈、历史摘要/情绪弧线缺口回填、`current_focus.md` 自动滚动、`particle_ledger.md` 的失管检测/低调用量回填、Truth Files 手改后的本地同步，以及 Studio/后续 CLI 共用的 `rejectChapter()` 回退恢复逻辑。
+  - 单章完整流水线、手动 `auditDraft` / `reviseDraft` / `writeNextChapter` 的主入口；同时负责“已批准章节但 truth files 落后”的写前自愈、历史摘要/情绪弧线缺口回填、`current_focus.md` 自动滚动、`particle_ledger.md` 的失管检测/低调用量回填、正文变化后的 truth 重结算、Truth Files 手改后的本地同步，以及 Studio/后续 CLI 共用的 `rejectChapter()` 回退恢复逻辑。
+- `packages/core/src/utils/chapter-continuity-pack.ts`
+  - 多章连续性上下文装配器。给 auditor / reviser 统一提供上一章全文、下一章开头片段和邻近章节摘要轨迹。
 - `packages/core/src/utils/length-metrics.ts`
   - 章节长度区间的计算入口。现在会优先读取项目配置里的 `lengthGovernance.range.softRatio / hardRatio`，默认值仍保持旧版区间。
 - `packages/core/src/pipeline/chapter-persistence.ts`
@@ -199,10 +233,12 @@ override 的持久化位置：
   - 所有 prompt 入口的目录定义，以及源码片段提取规则。
 - `packages/core/src/prompts/overrides.ts`
   - `inkos.json.promptOverrides` 的读取与 append/replace 应用逻辑。
+- `packages/core/src/llm/tracing.ts`
+  - 原始 LLM 请求/响应日志的统一追加器；负责把 request/response/error 写进项目根目录 `inkos-ai.log`。
 - `packages/studio/src/pages/PromptManager.tsx`
   - 提示词工作台页面：查看源码片段、编辑 override。
 - `packages/studio/src/api/server.ts`
-  - `/api/project/prompts` 的读写接口；章节 approve / approve-all 已改走 core 审批流程；Truth Files 保存后会调用 core 的 truth-edit 同步入口。
+  - `/api/project/prompts` 的读写接口；章节 approve / approve-all 已改走 core 审批流程；Truth Files 保存后会调用 core 的 truth-edit 同步入口；`/api/logs` / `/api/ai-logs` 分别暴露流程日志和 AI 原文日志。
 - `packages/cli/src/commands/studio.ts`
   - Studio 启动入口。Windows 下源码模式需要把 `tsx` loader 通过 `file://` URL 传给 `node --import`，但主入口 `.ts` 仍保持普通路径。
 - `scripts/pack-release.mjs`
@@ -311,6 +347,7 @@ pnpm release:pack
 - `review approve` 是否仍然承担 staged truth promote
 - prompt 目录是否新增/删除入口
 - `promptOverrides` 的存储格式或覆盖语义
+- `inkos.log` / `inkos-ai.log` 的写入位置、格式或可见入口
 - Studio 提示词页/API 的入口位置
 - 本地打包命令、CI 打包校验或 tag 发布流程
 

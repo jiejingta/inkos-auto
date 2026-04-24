@@ -1,5 +1,6 @@
 import type { LLMClient, OnStreamProgress } from "../llm/provider.js";
-import { chatCompletion, createLLMClient } from "../llm/provider.js";
+import { createLLMClient } from "../llm/provider.js";
+import { tracedChatCompletion } from "../llm/tracing.js";
 import type { Logger } from "../utils/logger.js";
 import type { BookConfig, FanficMode } from "../models/book.js";
 import type { ChapterMeta } from "../models/chapter.js";
@@ -32,7 +33,7 @@ import { dispatchNotification, dispatchWebhookEvent } from "../notify/dispatcher
 import type { WebhookEvent } from "../notify/webhook.js";
 import { applyPromptOverridePair } from "../prompts/overrides.js";
 import type { AgentContext } from "../agents/base.js";
-import type { AuditResult, AuditIssue } from "../agents/continuity.js";
+import type { AuditResult, AuditIssue, AuditTruthContext, TruthFileSnapshot } from "../agents/continuity.js";
 import type { RadarResult } from "../agents/radar.js";
 import type { LengthSpec, LengthTelemetry } from "../models/length-governance.js";
 import type { ContextPackage, RuleStack } from "../models/input-governance.js";
@@ -78,6 +79,16 @@ const REVIEWABLE_CHAPTER_STATUSES = new Set<ChapterMeta["status"]>([
 
 function isSequenceLevelCategory(category: string): boolean {
   return SEQUENCE_LEVEL_CATEGORIES.has(category);
+}
+
+function outputToTruthSnapshot(
+  output: Pick<WriteChapterOutput, "updatedState" | "updatedLedger" | "updatedHooks">,
+): TruthFileSnapshot {
+  return {
+    currentState: output.updatedState,
+    ledger: output.updatedLedger,
+    hooks: output.updatedHooks,
+  };
 }
 
 export interface PipelineConfig {
@@ -460,6 +471,36 @@ export class PipelineRunner {
     } catch {
       return false;
     }
+  }
+
+  private async readOptionalText(path: string): Promise<string | undefined> {
+    try {
+      return await readFile(path, "utf-8");
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async loadReviewStageTruthSnapshot(
+    bookId: string,
+    chapterNumber: number,
+  ): Promise<TruthFileSnapshot | undefined> {
+    const stageBookDir = this.state.reviewStageBookDir(bookId, chapterNumber);
+    if (!await this.pathExists(stageBookDir)) {
+      return undefined;
+    }
+
+    const storyDir = join(stageBookDir, "story");
+    const currentState = await this.readOptionalText(join(storyDir, "current_state.md"));
+    if (!currentState?.trim()) {
+      return undefined;
+    }
+
+    return {
+      currentState,
+      ledger: await this.readOptionalText(join(storyDir, "particle_ledger.md")),
+      hooks: await this.readOptionalText(join(storyDir, "pending_hooks.md")),
+    };
   }
 
   private async loadGenreProfile(genre: string): Promise<{ profile: GenreProfile }> {
@@ -906,6 +947,12 @@ export class PipelineRunner {
           this.config.externalContext,
           { reuseExistingIntentWhenContextMissing: true },
         );
+      const stagedTruth = chapterMeta.status === "audit-failed"
+        ? await this.loadReviewStageTruthSnapshot(bookId, targetChapter)
+        : undefined;
+      const revisionTruthContext: AuditTruthContext | undefined = stagedTruth
+        ? { candidate: stagedTruth }
+        : undefined;
       const preRevision = await this.evaluateMergedAudit({
         auditor,
         book,
@@ -918,8 +965,11 @@ export class PipelineRunner {
               chapterIntent: reviseControlInput.plan.intentMarkdown,
               contextPackage: reviseControlInput.composed.contextPackage,
               ruleStack: reviseControlInput.composed.ruleStack,
+              ...(revisionTruthContext ? { truthContext: revisionTruthContext } : {}),
             }
-          : undefined,
+          : revisionTruthContext
+            ? { truthContext: revisionTruthContext }
+            : undefined,
       });
 
       if (preRevision.blockingCount === 0 && preRevision.aiTellCount === 0) {
@@ -971,8 +1021,12 @@ export class PipelineRunner {
               contextPackage: reviseControlInput.composed.contextPackage,
               ruleStack: reviseControlInput.composed.ruleStack,
               lengthSpec,
+              ...(revisionTruthContext ? { truthContext: revisionTruthContext } : {}),
             }
-          : { lengthSpec },
+          : {
+              lengthSpec,
+              ...(revisionTruthContext ? { truthContext: revisionTruthContext } : {}),
+            },
       );
 
       if (reviseOutput.revisedContent.length === 0) {
@@ -985,6 +1039,22 @@ export class PipelineRunner {
         chapterContent: reviseOutput.revisedContent,
         lengthSpec,
       });
+      const settledRevision = await this.settleCandidateTruthForReview({
+        bookId,
+        book,
+        bookDir,
+        chapterNumber: targetChapter,
+        chapterTitle: chapterMeta.title,
+        chapterContent: normalizedRevision.content,
+        reducedControlInput: reviseControlInput
+          ? {
+              chapterIntent: reviseControlInput.plan.intentMarkdown,
+              contextPackage: reviseControlInput.composed.contextPackage,
+              ruleStack: reviseControlInput.composed.ruleStack,
+            }
+          : undefined,
+      });
+      const settledRevisionTruth = outputToTruthSnapshot(settledRevision);
       const postRevision = await this.evaluateMergedAudit({
         auditor,
         book,
@@ -998,18 +1068,14 @@ export class PipelineRunner {
               chapterIntent: reviseControlInput.plan.intentMarkdown,
               contextPackage: reviseControlInput.composed.contextPackage,
               ruleStack: reviseControlInput.composed.ruleStack,
-              truthFileOverrides: {
-                currentState: reviseOutput.updatedState !== "(状态卡未更新)" ? reviseOutput.updatedState : undefined,
-                ledger: reviseOutput.updatedLedger !== "(账本未更新)" ? reviseOutput.updatedLedger : undefined,
-                hooks: reviseOutput.updatedHooks !== "(伏笔池未更新)" ? reviseOutput.updatedHooks : undefined,
+              truthContext: {
+                candidate: settledRevisionTruth,
               },
             }
           : {
               temperature: 0,
-              truthFileOverrides: {
-                currentState: reviseOutput.updatedState !== "(状态卡未更新)" ? reviseOutput.updatedState : undefined,
-                ledger: reviseOutput.updatedLedger !== "(账本未更新)" ? reviseOutput.updatedLedger : undefined,
-                hooks: reviseOutput.updatedHooks !== "(伏笔池未更新)" ? reviseOutput.updatedHooks : undefined,
+              truthContext: {
+                candidate: settledRevisionTruth,
               },
             },
       });
@@ -1088,14 +1154,14 @@ export class PipelineRunner {
       const persistRevisionTruth = async (targetBookDir: string): Promise<void> => {
         const targetStoryDir = join(targetBookDir, "story");
         await mkdir(targetStoryDir, { recursive: true });
-        if (reviseOutput.updatedState !== "(状态卡未更新)") {
-          await writeFile(join(targetStoryDir, "current_state.md"), reviseOutput.updatedState, "utf-8");
+        if (settledRevision.updatedState.trim().length > 0) {
+          await writeFile(join(targetStoryDir, "current_state.md"), settledRevision.updatedState, "utf-8");
         }
-        if (gp.numericalSystem && reviseOutput.updatedLedger && reviseOutput.updatedLedger !== "(账本未更新)") {
-          await writeFile(join(targetStoryDir, "particle_ledger.md"), reviseOutput.updatedLedger, "utf-8");
+        if (gp.numericalSystem && settledRevision.updatedLedger.trim().length > 0) {
+          await writeFile(join(targetStoryDir, "particle_ledger.md"), settledRevision.updatedLedger, "utf-8");
         }
-        if (reviseOutput.updatedHooks !== "(伏笔池未更新)") {
-          await writeFile(join(targetStoryDir, "pending_hooks.md"), reviseOutput.updatedHooks, "utf-8");
+        if (settledRevision.updatedHooks.trim().length > 0) {
+          await writeFile(join(targetStoryDir, "pending_hooks.md"), settledRevision.updatedHooks, "utf-8");
         }
       };
 
@@ -1686,6 +1752,16 @@ export class PipelineRunner {
       reducedControlInput,
       lengthSpec,
       initialUsage: totalUsage,
+      resettleChapterState: (chapterContent) => this.settleCandidateTruthForReview({
+        bookId,
+        book,
+        bookDir,
+        chapterNumber,
+        chapterTitle: output.title,
+        chapterContent,
+        reducedControlInput,
+        writer,
+      }),
       createReviser: () => new ReviserAgent(this.agentCtxFor("reviser", bookId)),
       auditor,
       normalizeDraftLengthIfNeeded: (chapterContent) => this.normalizeDraftLengthIfNeeded({
@@ -1718,6 +1794,7 @@ export class PipelineRunner {
       book,
       bookDir,
       chapterNumber,
+      chapterTitle: output.title,
       chapterContent: finalContent,
       chapterWordCount: finalWordCount,
       auditResult,
@@ -1725,6 +1802,7 @@ export class PipelineRunner {
       reducedControlInput,
       lengthSpec,
       language: pipelineLang,
+      candidateTruth: reviewResult.candidateTruth,
     });
     totalUsage = PipelineRunner.addUsage(totalUsage, localBodyGuard.tokenUsage);
     finalContent = localBodyGuard.content;
@@ -2340,7 +2418,7 @@ export class PipelineRunner {
       system: styleGuideSystemPrompt,
       user: styleGuideUserPrompt,
     });
-    const response = await chatCompletion(this.config.client, this.config.model, [
+    const response = await tracedChatCompletion(this.config.client, this.config.model, [
       {
         role: "system",
         content: styleGuidePrompts.system ?? styleGuideSystemPrompt,
@@ -2349,7 +2427,13 @@ export class PipelineRunner {
         role: "user",
         content: styleGuidePrompts.user ?? styleGuideUserPrompt,
       },
-    ], { temperature: 0.3, maxTokens: 4096 });
+    ], { temperature: 0.3, maxTokens: 4096 }, {
+      projectRoot: this.config.projectRoot,
+      bookId,
+      agent: "pipeline",
+      promptId: "pipeline.style-guide",
+      logger: this.config.logger,
+    });
 
     await writeFile(join(storyDir, "style_guide.md"), response.content, "utf-8");
     return response.content;
@@ -2468,7 +2552,7 @@ ${matrix}`;
       system: parentCanonSystemPrompt,
       user: parentCanonUserPrompt,
     });
-    const response = await chatCompletion(this.config.client, this.config.model, [
+    const response = await tracedChatCompletion(this.config.client, this.config.model, [
       {
         role: "system",
         content: parentCanonPrompts.system ?? parentCanonSystemPrompt,
@@ -2477,7 +2561,13 @@ ${matrix}`;
         role: "user",
         content: parentCanonPrompts.user ?? parentCanonUserPrompt,
       },
-    ], { temperature: 0.3, maxTokens: 16384 });
+    ], { temperature: 0.3, maxTokens: 16384 }, {
+      projectRoot: this.config.projectRoot,
+      bookId: targetBookId,
+      agent: "pipeline",
+      promptId: "pipeline.parent-canon",
+      logger: this.config.logger,
+    });
 
     // Append deterministic meta block (LLM may hallucinate timestamps)
     const metaBlock = [
@@ -2954,11 +3044,41 @@ ${matrix}`;
     ].join("\n");
   }
 
+  private async settleCandidateTruthForReview(params: {
+    readonly bookId: string;
+    readonly book: BookConfig;
+    readonly bookDir: string;
+    readonly chapterNumber: number;
+    readonly chapterTitle: string;
+    readonly chapterContent: string;
+    readonly reducedControlInput?: {
+      chapterIntent: string;
+      contextPackage: ContextPackage;
+      ruleStack: RuleStack;
+    };
+    readonly writer?: WriterAgent;
+  }): Promise<
+    Pick<WriteChapterOutput, "content" | "wordCount" | "updatedState" | "updatedLedger" | "updatedHooks" | "tokenUsage">
+  > {
+    const writer = params.writer ?? new WriterAgent(this.agentCtxFor("writer", params.bookId));
+    return writer.settleChapterState({
+      book: params.book,
+      bookDir: params.bookDir,
+      chapterNumber: params.chapterNumber,
+      title: params.chapterTitle,
+      content: params.chapterContent,
+      chapterIntent: params.reducedControlInput?.chapterIntent,
+      contextPackage: params.reducedControlInput?.contextPackage,
+      ruleStack: params.reducedControlInput?.ruleStack,
+    });
+  }
+
   private async repairLocalBlockingBodyIssues(params: {
     readonly bookId: string;
     readonly book: BookConfig;
     readonly bookDir: string;
     readonly chapterNumber: number;
+    readonly chapterTitle: string;
     readonly chapterContent: string;
     readonly chapterWordCount: number;
     readonly auditResult: AuditResult;
@@ -2970,6 +3090,7 @@ ${matrix}`;
     };
     readonly lengthSpec: LengthSpec;
     readonly language: LengthLanguage;
+    readonly candidateTruth?: TruthFileSnapshot;
   }): Promise<{
     readonly content: string;
     readonly wordCount: number;
@@ -3019,6 +3140,7 @@ ${matrix}`;
       {
         ...params.reducedControlInput,
         lengthSpec: params.lengthSpec,
+        ...(params.candidateTruth ? { truthContext: { candidate: params.candidateTruth } } : {}),
       },
     );
 
@@ -3051,15 +3173,36 @@ ${matrix}`;
       parsedRules?.rules ?? null,
       params.language,
     ).filter((violation) => violation.severity !== "warning");
+    const settled = await this.settleCandidateTruthForReview({
+      bookId: params.bookId,
+      book: params.book,
+      bookDir: params.bookDir,
+      chapterNumber: params.chapterNumber,
+      chapterTitle: params.chapterTitle,
+      chapterContent: content,
+      reducedControlInput: params.reducedControlInput,
+    });
+    totalUsage = PipelineRunner.addUsage(
+      totalUsage ?? { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+      settled.tokenUsage,
+    );
 
     const reAudit = await params.auditor.auditChapter(
       params.bookDir,
       content,
       params.chapterNumber,
       params.book.genre,
-      params.reducedControlInput
-        ? { ...params.reducedControlInput, temperature: 0 }
-        : { temperature: 0 },
+      {
+        ...(params.reducedControlInput ?? {}),
+        temperature: 0,
+        truthContext: {
+          candidate: {
+            currentState: settled.updatedState,
+            ledger: settled.updatedLedger,
+            hooks: settled.updatedHooks,
+          },
+        },
+      },
     );
     totalUsage = PipelineRunner.addUsage(
       totalUsage ?? { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
@@ -4128,6 +4271,7 @@ ${matrix}`;
         ledger?: string;
         hooks?: string;
       };
+      truthContext?: AuditTruthContext;
     };
   }): Promise<MergedAuditEvaluation> {
     const llmAudit = await params.auditor.auditChapter(

@@ -5,9 +5,10 @@ import type { FanficMode } from "../models/book.js";
 import type { ContextPackage, RuleStack } from "../models/input-governance.js";
 import { readGenreProfile, readBookLanguage, readBookRules } from "./rules-reader.js";
 import { getFanficDimensionConfig, FANFIC_DIMENSIONS } from "./fanfic-dimensions.js";
-import { readFile, readdir } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { filterHooks, filterSummaries, filterSubplots, filterEmotionalArcs, filterCharacterMatrix } from "../utils/context-filter.js";
 import { buildGovernedMemoryEvidenceBlocks } from "../utils/governed-context.js";
+import { loadRevisionContinuityPack, type RevisionContinuityPack } from "../utils/chapter-continuity-pack.js";
 import { join } from "node:path";
 
 export interface AuditResult {
@@ -26,6 +27,17 @@ export interface AuditIssue {
   readonly category: string;
   readonly description: string;
   readonly suggestion: string;
+}
+
+export interface TruthFileSnapshot {
+  readonly currentState?: string;
+  readonly ledger?: string;
+  readonly hooks?: string;
+}
+
+export interface AuditTruthContext {
+  readonly official?: TruthFileSnapshot;
+  readonly candidate?: TruthFileSnapshot;
 }
 
 type PromptLanguage = "zh" | "en";
@@ -412,11 +424,13 @@ export class ContinuityAuditor extends BaseAgent {
       chapterIntent?: string;
       contextPackage?: ContextPackage;
       ruleStack?: RuleStack;
+      truthContext?: AuditTruthContext;
       truthFileOverrides?: {
         currentState?: string;
         ledger?: string;
         hooks?: string;
       };
+      continuityPack?: RevisionContinuityPack;
     },
   ): Promise<AuditResult> {
     const [diskCurrentState, diskLedger, diskHooks, styleGuideRaw, subplotBoard, emotionalArcs, characterMatrix, chapterSummaries, parentCanon, fanficCanon, volumeOutline] =
@@ -433,15 +447,32 @@ export class ContinuityAuditor extends BaseAgent {
         this.readFileSafe(join(bookDir, "story/fanfic_canon.md")),
         this.readFileSafe(join(bookDir, "story/volume_outline.md")),
       ]);
-    const currentState = options?.truthFileOverrides?.currentState ?? diskCurrentState;
-    const ledger = options?.truthFileOverrides?.ledger ?? diskLedger;
-    const hooks = options?.truthFileOverrides?.hooks ?? diskHooks;
+    const officialTruth = {
+      currentState: options?.truthContext?.official?.currentState ?? diskCurrentState,
+      ledger: options?.truthContext?.official?.ledger ?? diskLedger,
+      hooks: options?.truthContext?.official?.hooks ?? diskHooks,
+    };
+    const candidateTruth = {
+      currentState: options?.truthContext?.candidate?.currentState ?? options?.truthFileOverrides?.currentState,
+      ledger: options?.truthContext?.candidate?.ledger ?? options?.truthFileOverrides?.ledger,
+      hooks: options?.truthContext?.candidate?.hooks ?? options?.truthFileOverrides?.hooks,
+    };
+    const currentState = candidateTruth.currentState ?? officialTruth.currentState;
+    const ledger = candidateTruth.ledger ?? officialTruth.ledger;
+    const hooks = candidateTruth.hooks ?? officialTruth.hooks;
+    const hasCandidateTruth = [
+      candidateTruth.currentState,
+      candidateTruth.ledger,
+      candidateTruth.hooks,
+    ].some((value) => Boolean(value?.trim()));
 
     const hasParentCanon = parentCanon !== "(文件不存在)";
     const hasFanficCanon = fanficCanon !== "(文件不存在)";
 
-    // Load last chapter full text for fine-grained continuity checking
-    const previousChapter = await this.loadPreviousChapter(bookDir, chapterNumber);
+    const continuityPack = options?.continuityPack
+      ?? await loadRevisionContinuityPack(bookDir, chapterNumber, chapterSummaries);
+    const previousChapter = continuityPack.previousChapterFullText ?? "";
+    const nextChapterOpening = continuityPack.nextChapterOpening ?? "";
 
     // Load genre profile and book rules
     const genreId = genre ?? "other";
@@ -501,8 +532,13 @@ Output format MUST be JSON:
 Editorial gate after you emit issues:
 - Reject when any critical issue exists.
 - Reject when any warning would pollute long-term story state (timeline contradiction, setting/canon/world-rule drift, power/resource inconsistency, POV knowledge leak, broken motivation/relationship continuity).
-- Reject when there are 3 or more ordinary warnings.
+- Reject when there are 6 or more ordinary warnings.
 - Usually approve when there are only info issues, or only one minor surface warning with no downstream effect.
+
+When both official pre-chapter truth and candidate post-chapter truth are provided:
+- Use official pre-chapter truth to verify whether the chapter starts from the already-approved canon.
+- Use candidate post-chapter truth to verify whether the chapter ending is supported by the body.
+- Do not treat candidate post-chapter truth as the chapter's starting state.
 
 Set severities carefully. The code will enforce these thresholds after parsing.`
       : `你是一位严格的${gp.name}网络小说审稿编辑。你的任务是对章节进行连续性、一致性和质量审查。${protagonistBlock}${searchNote}
@@ -527,16 +563,15 @@ ${dimList}
 编辑审核门槛：
 - 只要存在任何 critical 问题，直接拒绝。
 - 只要存在会污染长期故事状态的 warning（时间线矛盾、设定/正史/世界规则漂移、战力或资源设定不一致、POV 知识泄露、角色动机或关系连续性断裂），直接拒绝。
-- 存在 3 个或更多普通 warning，拒绝。
+- 存在 6 个或更多普通 warning，拒绝。
 - 只有 info，或仅有 1 个无后续影响的轻微表面 warning，通常通过。
 
-请谨慎标注 severity。代码层会在解析后再次按这些门槛裁决 passed。`;
+如果同时提供了“官方章前 truth”和“候选章后 truth”：
+- 用官方章前 truth 检查本章开头是否承接已批准内容。
+- 用候选章后 truth 检查章末状态是否被正文充分支撑。
+- 不得把候选章后 truth 当成本章开头状态。
 
-    const ledgerBlock = gp.numericalSystem
-      ? isEnglish
-        ? `\n## Resource Ledger\n${ledger}`
-        : `\n## 资源账本\n${ledger}`
-      : "";
+请谨慎标注 severity。代码层会在解析后再次按这些门槛裁决 passed。`;
 
     // Smart context filtering for auditor — same logic as writer
     const bookRulesForFilter = parsedRules?.rules ?? null;
@@ -578,6 +613,11 @@ ${dimList}
           : `\n## 章节摘要（用于节奏检查）\n${filteredSummaries}\n`
         : "");
     const volumeSummariesBlock = governedMemoryBlocks?.volumeSummariesBlock ?? "";
+    const chapterTrailBlock = continuityPack.chapterTrail
+      ? isEnglish
+        ? `\n## Nearby Chapter Trail (N-3..N+1)\n${continuityPack.chapterTrail}\n`
+        : `\n## 邻近章节轨迹（N-3..N+1）\n${continuityPack.chapterTrail}\n`
+      : "";
 
     const canonBlock = hasParentCanon
       ? isEnglish
@@ -610,23 +650,48 @@ ${dimList}
         ? `\n## Previous Chapter Full Text (for transition checks)\n${previousChapter}\n`
         : `\n## 上一章全文（用于衔接检查）\n${previousChapter}\n`
       : "";
+    const nextChapterBlock = nextChapterOpening
+      ? isEnglish
+        ? `\n## Next Chapter Opening (if it already exists)\n${nextChapterOpening}\n`
+        : `\n## 下一章开头（若已存在，避免回写冲突）\n${nextChapterOpening}\n`
+      : "";
+    const officialLedgerBlock = gp.numericalSystem
+      ? isEnglish
+        ? `\n### Official Pre-Chapter Ledger\n${officialTruth.ledger}\n`
+        : `\n### 官方章前账本\n${officialTruth.ledger}\n`
+      : "";
+    const candidateLedgerBlock = gp.numericalSystem && hasCandidateTruth
+      ? isEnglish
+        ? `\n### Candidate Post-Chapter Ledger\n${candidateTruth.ledger ?? ledger}\n`
+        : `\n### 候选章后账本\n${candidateTruth.ledger ?? ledger}\n`
+      : "";
+    const truthStateBlock = hasCandidateTruth
+      ? isEnglish
+        ? `## Official Pre-Chapter State Card\n${officialTruth.currentState}${officialLedgerBlock}
+
+## Candidate Post-Chapter State Card
+${candidateTruth.currentState ?? currentState}${candidateLedgerBlock}`
+        : `## 官方章前状态卡
+${officialTruth.currentState}${officialLedgerBlock}
+
+## 候选章后状态卡
+${candidateTruth.currentState ?? currentState}${candidateLedgerBlock}`
+      : isEnglish
+        ? `## Current State Card\n${officialTruth.currentState}${officialLedgerBlock}`
+        : `## 当前状态卡\n${officialTruth.currentState}${officialLedgerBlock}`;
 
     const userPrompt = isEnglish
       ? `Review chapter ${chapterNumber}.
 
-## Current State Card
-${currentState}
-${ledgerBlock}
-${hooksBlock}${volumeSummariesBlock}${subplotBlock}${emotionalBlock}${matrixBlock}${summariesBlock}${canonBlock}${fanficCanonBlock}${reducedControlBlock || outlineBlock}${prevChapterBlock}${styleGuideBlock}
+${truthStateBlock}
+${hooksBlock}${chapterTrailBlock}${volumeSummariesBlock}${subplotBlock}${emotionalBlock}${matrixBlock}${summariesBlock}${canonBlock}${fanficCanonBlock}${reducedControlBlock || outlineBlock}${prevChapterBlock}${nextChapterBlock}${styleGuideBlock}
 
 ## Chapter Content Under Review
 ${chapterContent}`
       : `请审查第${chapterNumber}章。
 
-## 当前状态卡
-${currentState}
-${ledgerBlock}
-${hooksBlock}${volumeSummariesBlock}${subplotBlock}${emotionalBlock}${matrixBlock}${summariesBlock}${canonBlock}${fanficCanonBlock}${reducedControlBlock || outlineBlock}${prevChapterBlock}${styleGuideBlock}
+${truthStateBlock}
+${hooksBlock}${chapterTrailBlock}${volumeSummariesBlock}${subplotBlock}${emotionalBlock}${matrixBlock}${summariesBlock}${canonBlock}${fanficCanonBlock}${reducedControlBlock || outlineBlock}${prevChapterBlock}${nextChapterBlock}${styleGuideBlock}
 
 ## 待审章节内容
 ${chapterContent}`;
@@ -808,20 +873,6 @@ ${overrides}\n`;
       };
     } catch {
       return null;
-    }
-  }
-
-  private async loadPreviousChapter(bookDir: string, currentChapter: number): Promise<string> {
-    if (currentChapter <= 1) return "";
-    const chaptersDir = join(bookDir, "chapters");
-    try {
-      const files = await readdir(chaptersDir);
-      const paddedPrev = String(currentChapter - 1).padStart(4, "0");
-      const prevFile = files.find((f) => f.startsWith(paddedPrev) && f.endsWith(".md"));
-      if (!prevFile) return "";
-      return await readFile(join(chaptersDir, prevFile), "utf-8");
-    } catch {
-      return "";
     }
   }
 

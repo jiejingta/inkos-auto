@@ -227,6 +227,87 @@ describe("ReviserAgent", () => {
     }
   });
 
+  it("shows official pre-truth and candidate post-truth separately in revision prompts", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-reviser-truth-context-test-"));
+    const bookDir = join(root, "book");
+    const storyDir = join(bookDir, "story");
+    await mkdir(storyDir, { recursive: true });
+    await Promise.all([
+      writeFile(join(storyDir, "current_state.md"), "OFFICIAL PRE STATE", "utf-8"),
+      writeFile(join(storyDir, "pending_hooks.md"), "OFFICIAL PRE HOOKS", "utf-8"),
+    ]);
+
+    const agent = new ReviserAgent({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0, maxTokensCap: null,
+          extra: {},
+        },
+      },
+      model: "test-model",
+      projectRoot: root,
+    });
+
+    const chatSpy = vi.spyOn(ReviserAgent.prototype as never, "chat" as never).mockResolvedValue({
+      content: [
+        "=== FIXED_ISSUES ===",
+        "- repaired",
+        "",
+        "=== PATCHES ===",
+        "--- PATCH 1 ---",
+        "TARGET_TEXT:",
+        "原始正文。",
+        "REPLACEMENT_TEXT:",
+        "修订后的正文。",
+        "--- END PATCH ---",
+        "",
+        "=== UPDATED_STATE ===",
+        "状态卡",
+        "",
+        "=== UPDATED_HOOKS ===",
+        "伏笔池",
+      ].join("\n"),
+      usage: ZERO_USAGE,
+    });
+
+    try {
+      await agent.reviseChapter(
+        bookDir,
+        "原始正文。",
+        1,
+        [CRITICAL_ISSUE],
+        "spot-fix",
+        "xuanhuan",
+        {
+          truthContext: {
+            candidate: {
+              currentState: "CANDIDATE POST STATE",
+              hooks: "CANDIDATE POST HOOKS",
+            },
+          },
+        },
+      );
+
+      const messages = chatSpy.mock.calls[0]?.[0] as
+        | ReadonlyArray<{ content: string }>
+        | undefined;
+      const userPrompt = messages?.[1]?.content ?? "";
+
+      expect(userPrompt).toContain("## 官方章前状态卡（修订起点）");
+      expect(userPrompt).toContain("OFFICIAL PRE STATE");
+      expect(userPrompt).toContain("## 候选章后真相（修订目标，不是章初状态）");
+      expect(userPrompt).toContain("CANDIDATE POST STATE");
+      expect(userPrompt).toContain("CANDIDATE POST HOOKS");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("reconstructs revised content from spot-fix patches and preserves untouched text", async () => {
     const root = await mkdtemp(join(tmpdir(), "inkos-reviser-spotfix-patch-test-"));
     const bookDir = join(root, "book");

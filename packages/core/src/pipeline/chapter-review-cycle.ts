@@ -1,4 +1,4 @@
-import type { AuditIssue, AuditResult } from "../agents/continuity.js";
+import type { AuditIssue, AuditResult, AuditTruthContext, TruthFileSnapshot } from "../agents/continuity.js";
 import type { ReviseMode, ReviseOutput } from "../agents/reviser.js";
 import type { WriteChapterOutput } from "../agents/writer.js";
 import type { ContextPackage, RuleStack } from "../models/input-governance.js";
@@ -26,16 +26,35 @@ export interface ChapterReviewCycleResult {
   readonly totalUsage: ChapterReviewCycleUsage;
   readonly postReviseCount: number;
   readonly normalizeApplied: boolean;
+  readonly candidateTruth: TruthFileSnapshot;
+}
+
+function buildTruthSnapshot(
+  output: Pick<WriteChapterOutput, "updatedState" | "updatedLedger" | "updatedHooks">,
+): TruthFileSnapshot {
+  return {
+    currentState: output.updatedState,
+    ledger: output.updatedLedger,
+    hooks: output.updatedHooks,
+  };
 }
 
 export async function runChapterReviewCycle(params: {
   readonly book: Pick<{ genre: string }, "genre">;
   readonly bookDir: string;
   readonly chapterNumber: number;
-  readonly initialOutput: Pick<WriteChapterOutput, "content" | "wordCount" | "postWriteErrors">;
+  readonly initialOutput: Pick<
+    WriteChapterOutput,
+    "title" | "content" | "wordCount" | "postWriteErrors" | "updatedState" | "updatedLedger" | "updatedHooks"
+  >;
   readonly reducedControlInput?: ChapterReviewCycleControlInput;
   readonly lengthSpec: LengthSpec;
   readonly initialUsage: ChapterReviewCycleUsage;
+  readonly resettleChapterState: (
+    chapterContent: string,
+  ) => Promise<
+    Pick<WriteChapterOutput, "content" | "wordCount" | "updatedState" | "updatedLedger" | "updatedHooks" | "tokenUsage">
+  >;
   readonly createReviser: () => {
     reviseChapter: (
       bookDir: string,
@@ -49,6 +68,7 @@ export async function runChapterReviewCycle(params: {
         contextPackage?: ContextPackage;
         ruleStack?: RuleStack;
         lengthSpec?: LengthSpec;
+        truthContext?: AuditTruthContext;
       },
     ) => Promise<ReviseOutput>;
   };
@@ -63,6 +83,10 @@ export async function runChapterReviewCycle(params: {
         chapterIntent?: string;
         contextPackage?: ContextPackage;
         ruleStack?: RuleStack;
+        truthContext?: {
+          official?: TruthFileSnapshot;
+          candidate?: TruthFileSnapshot;
+        };
       },
     ) => Promise<AuditResult>;
   };
@@ -92,6 +116,32 @@ export async function runChapterReviewCycle(params: {
   let finalContent = params.initialOutput.content;
   let finalWordCount = params.initialOutput.wordCount;
   let revised = false;
+  let candidateTruth = buildTruthSnapshot(params.initialOutput);
+  let candidateTruthContent = params.initialOutput.content;
+
+  const buildAuditOptions = (temperature?: number) => ({
+    ...(params.reducedControlInput ?? {}),
+    ...(temperature === undefined ? {} : { temperature }),
+    truthContext: {
+      candidate: candidateTruth,
+    },
+  });
+  const buildReviserOptions = () => ({
+    ...(params.reducedControlInput ?? {}),
+    lengthSpec: params.lengthSpec,
+    truthContext: {
+      candidate: candidateTruth,
+    },
+  });
+  const refreshCandidateTruth = async (chapterContent: string): Promise<void> => {
+    if (chapterContent === candidateTruthContent) {
+      return;
+    }
+    const resettled = await params.resettleChapterState(chapterContent);
+    totalUsage = params.addUsage(totalUsage, resettled.tokenUsage);
+    candidateTruth = buildTruthSnapshot(resettled);
+    candidateTruthContent = chapterContent;
+  };
 
   if (params.initialOutput.postWriteErrors.length > 0) {
     params.logWarn({
@@ -112,10 +162,7 @@ export async function runChapterReviewCycle(params: {
       spotFixIssues,
       "spot-fix",
       params.book.genre,
-      {
-        ...params.reducedControlInput,
-        lengthSpec: params.lengthSpec,
-      },
+      buildReviserOptions(),
     );
     totalUsage = params.addUsage(totalUsage, fixResult.tokenUsage);
     if (fixResult.revisedContent.length > 0) {
@@ -131,6 +178,7 @@ export async function runChapterReviewCycle(params: {
   finalWordCount = normalizedBeforeAudit.wordCount;
   normalizeApplied = normalizeApplied || normalizedBeforeAudit.applied;
   params.assertChapterContentNotEmpty(finalContent, "draft generation");
+  await refreshCandidateTruth(finalContent);
 
   params.logStage({ zh: "审计草稿", en: "auditing draft" });
   const llmAudit = await params.auditor.auditChapter(
@@ -138,7 +186,7 @@ export async function runChapterReviewCycle(params: {
     finalContent,
     params.chapterNumber,
     params.book.genre,
-    params.reducedControlInput,
+    buildAuditOptions(),
   );
   totalUsage = params.addUsage(totalUsage, llmAudit.tokenUsage);
   const aiTellsResult = params.analyzeAITells(finalContent);
@@ -171,10 +219,7 @@ export async function runChapterReviewCycle(params: {
         blockingIssues,
         revisionStrategy.mode,
         params.book.genre,
-        {
-          ...params.reducedControlInput,
-          lengthSpec: params.lengthSpec,
-        },
+        buildReviserOptions(),
       );
       totalUsage = params.addUsage(totalUsage, reviseOutput.tokenUsage);
 
@@ -193,14 +238,13 @@ export async function runChapterReviewCycle(params: {
           params.assertChapterContentNotEmpty(finalContent, "revision");
         }
 
+        await refreshCandidateTruth(finalContent);
         const reAudit = await params.auditor.auditChapter(
           params.bookDir,
           finalContent,
           params.chapterNumber,
           params.book.genre,
-          params.reducedControlInput
-            ? { ...params.reducedControlInput, temperature: 0 }
-            : { temperature: 0 },
+          buildAuditOptions(0),
         );
         totalUsage = params.addUsage(totalUsage, reAudit.tokenUsage);
         const reAITells = params.analyzeAITells(finalContent);
@@ -224,5 +268,6 @@ export async function runChapterReviewCycle(params: {
     totalUsage,
     postReviseCount,
     normalizeApplied,
+    candidateTruth,
   };
 }

@@ -1,11 +1,16 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createInteractionToolsFromDeps } from "../interaction/project-tools.js";
 
-const mockChatCompletion = vi.hoisted(() => vi.fn());
+const { tracedChatCompletionMock } = vi.hoisted(() => ({
+  tracedChatCompletionMock: vi.fn(),
+}));
 
-vi.mock("../index.js", async (importOriginal) => {
-  const actual = await importOriginal<Record<string, unknown>>();
-  return { ...actual, chatCompletion: mockChatCompletion };
+vi.mock("../llm/tracing.js", async () => {
+  const actual = await vi.importActual<typeof import("../llm/tracing.js")>("../llm/tracing.js");
+  return {
+    ...actual,
+    tracedChatCompletion: tracedChatCompletionMock,
+  };
 });
 
 const fakePipeline = {
@@ -36,11 +41,11 @@ const MOCK_RESPONSE = {
 
 describe("chat tool – maxTokens forwarding", () => {
   beforeEach(() => {
-    mockChatCompletion.mockResolvedValue({
+    tracedChatCompletionMock.mockResolvedValue({
       content: "Hello",
       tokensUsed: { prompt: 5, completion: 10, total: 15 },
     });
-    mockChatCompletion.mockClear();
+    tracedChatCompletionMock.mockClear();
   });
 
   it("does not pass maxTokens to chatCompletion when depth has no maxTokens set", async () => {
@@ -54,8 +59,8 @@ describe("chat tool – maxTokens forwarding", () => {
 
     await tools.chat?.("你好", { bookId: "test-book", automationMode: "manual" });
 
-    expect(mockChatCompletion).toHaveBeenCalledOnce();
-    const options = mockChatCompletion.mock.calls[0]?.[3] as Record<string, unknown> | undefined;
+    expect(tracedChatCompletionMock).toHaveBeenCalledOnce();
+    const options = tracedChatCompletionMock.mock.calls[0]?.[3] as Record<string, unknown> | undefined;
     expect(options).not.toHaveProperty("maxTokens");
   });
 
@@ -70,13 +75,13 @@ describe("chat tool – maxTokens forwarding", () => {
 
     await tools.chat?.("你好", { bookId: "test-book", automationMode: "manual" });
 
-    expect(mockChatCompletion).toHaveBeenCalledOnce();
-    const options = mockChatCompletion.mock.calls[0]?.[3] as Record<string, unknown> | undefined;
+    expect(tracedChatCompletionMock).toHaveBeenCalledOnce();
+    const options = tracedChatCompletionMock.mock.calls[0]?.[3] as Record<string, unknown> | undefined;
     expect(options).toHaveProperty("maxTokens", 512);
   });
 
   it("rethrows real chatCompletion errors instead of silently falling back", async () => {
-    mockChatCompletion.mockRejectedValueOnce(new Error("provider down"));
+    tracedChatCompletionMock.mockRejectedValueOnce(new Error("provider down"));
 
     const tools = createInteractionToolsFromDeps(
       fakePipeline as never,
@@ -94,8 +99,8 @@ describe("chat tool – maxTokens forwarding", () => {
 
 describe("developBookDraft – maxTokens not capped", () => {
   beforeEach(() => {
-    mockChatCompletion.mockResolvedValue(MOCK_RESPONSE);
-    mockChatCompletion.mockClear();
+    tracedChatCompletionMock.mockResolvedValue(MOCK_RESPONSE);
+    tracedChatCompletionMock.mockClear();
   });
 
   it("does not pass maxTokens to chatCompletion so thinking models are not truncated", async () => {
@@ -106,13 +111,13 @@ describe("developBookDraft – maxTokens not capped", () => {
 
     await tools.developBookDraft?.("我想写都市异能", undefined);
 
-    expect(mockChatCompletion).toHaveBeenCalledOnce();
-    const options = mockChatCompletion.mock.calls[0]?.[3] as Record<string, unknown> | undefined;
+    expect(tracedChatCompletionMock).toHaveBeenCalledOnce();
+    const options = tracedChatCompletionMock.mock.calls[0]?.[3] as Record<string, unknown> | undefined;
     expect(options).not.toHaveProperty("maxTokens");
   });
 
   it("normalizes incomplete draft payloads before returning them to the UI", async () => {
-    mockChatCompletion.mockResolvedValueOnce({
+    tracedChatCompletionMock.mockResolvedValueOnce({
       content: JSON.stringify({
         assistantReply: "先把卷一方向收住。",
         draft: {
