@@ -30,7 +30,7 @@ describe("resolveRevisionMode", () => {
     expect(result.mode).toBe("rewrite");
   });
 
-  it("escalates world-rule drift to rework before repeated failures accumulate", () => {
+  it("keeps warning-level world-rule drift in spot-fix scope", () => {
     const result = resolveRevisionMode({
       issues: [{
         severity: "warning",
@@ -38,19 +38,47 @@ describe("resolveRevisionMode", () => {
       }],
     });
 
-    expect(result.mode).toBe("rework");
+    expect(result.mode).toBe("spot-fix");
   });
 
-  it("promotes structural continuity issues to rewrite after four consecutive failures", () => {
+  it("promotes repeated structural criticals to rewrite after four consecutive failures", () => {
     const result = resolveRevisionMode({
       consecutiveFailures: 4,
-      issues: [{
-        severity: "warning",
-        category: "角色动机或关系连续性断裂",
-      }],
+      issues: [
+        {
+          severity: "critical",
+          category: "角色动机或关系连续性断裂",
+        },
+        {
+          severity: "critical",
+          category: "时间线矛盾",
+        },
+      ],
     });
 
     expect(result.mode).toBe("rewrite");
+  });
+
+  it("keeps repeated local warning cleanup in spot-fix scope", () => {
+    const result = resolveRevisionMode({
+      consecutiveFailures: 6,
+      issues: [
+        {
+          severity: "warning",
+          category: "连续性检查",
+        },
+        {
+          severity: "warning",
+          category: "设定冲突",
+        },
+        {
+          severity: "warning",
+          category: "数据不一致",
+        },
+      ],
+    });
+
+    expect(result.mode).toBe("spot-fix");
   });
 
   it("preserves explicitly requested non-spot-fix modes", () => {

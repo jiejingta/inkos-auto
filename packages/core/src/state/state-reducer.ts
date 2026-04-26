@@ -188,7 +188,6 @@ function applyCurrentStatePatch(
     };
   }
 
-  const nextFacts = [...currentState.facts];
   const labels = language === "en"
     ? {
       currentLocation: ["Current Location", "当前位置"],
@@ -206,6 +205,13 @@ function applyCurrentStatePatch(
       currentAlliances: ["当前敌我", "Current Alliances", "Current Relationships"],
       currentConflict: ["当前冲突", "Current Conflict"],
     };
+  const corePredicates = new Set(
+    Object.values(labels)
+      .flatMap((aliases) => aliases.map((alias) => alias.toLowerCase())),
+  );
+  const nextFacts = currentState.facts.filter((fact) =>
+    corePredicates.has(fact.predicate.toLowerCase())
+  );
 
   for (const [patchKey, aliases] of Object.entries(labels) as Array<[
     keyof typeof labels,

@@ -69,6 +69,22 @@ export class LengthNormalizerAgent extends BaseAgent {
 
     const normalizedContent = this.sanitizeNormalizedContent(response.content, input.chapterContent);
     const finalCount = countChapterLength(normalizedContent, input.lengthSpec.countingMode);
+    const rejectionWarning = this.buildRejectionWarning({
+      originalCount,
+      finalCount,
+      lengthSpec: input.lengthSpec,
+    });
+    if (rejectionWarning) {
+      return {
+        normalizedContent: input.chapterContent,
+        finalCount: originalCount,
+        applied: false,
+        mode,
+        warning: rejectionWarning,
+        tokenUsage: response.usage,
+      };
+    }
+
     const warning = this.buildWarning(finalCount, input.lengthSpec);
 
     return {
@@ -142,6 +158,29 @@ ${input.chapterContent}`;
     }
 
     return `Final count ${finalCount} is outside the soft range ${lengthSpec.softMin}-${lengthSpec.softMax} after one normalization pass.`;
+  }
+
+  private buildRejectionWarning(params: {
+    readonly originalCount: number;
+    readonly finalCount: number;
+    readonly lengthSpec: LengthSpec;
+  }): string | undefined {
+    const { originalCount, finalCount, lengthSpec } = params;
+    const originalDistance = Math.abs(originalCount - lengthSpec.target);
+    const finalDistance = Math.abs(finalCount - lengthSpec.target);
+    const finalOutsideHard = isOutsideHardRange(finalCount, lengthSpec);
+
+    if (finalOutsideHard) {
+      return `Normalization output rejected: final count ${finalCount} is outside the hard range ${lengthSpec.hardMin}-${lengthSpec.hardMax}; keeping original count ${originalCount}.`;
+    }
+
+    const originalOutsideSoft = isOutsideSoftRange(originalCount, lengthSpec);
+    const finalOutsideSoft = isOutsideSoftRange(finalCount, lengthSpec);
+    if (originalOutsideSoft && finalOutsideSoft && finalDistance >= originalDistance) {
+      return `Normalization output rejected: final count ${finalCount} is farther from target ${lengthSpec.target} than original count ${originalCount}; keeping original.`;
+    }
+
+    return undefined;
   }
 
   private sanitizeNormalizedContent(rawContent: string, fallbackContent: string): string {

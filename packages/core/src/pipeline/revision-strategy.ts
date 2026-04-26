@@ -69,9 +69,17 @@ export function resolveRevisionMode(params: {
   const hasStructuralContinuityIssue = normalizedCategories.some((category) =>
     STRUCTURAL_CONTINUITY_PATTERNS.some((pattern) => category.includes(pattern)),
   );
+  const narrativeCriticalCount = blockingIssues.filter((issue, index) =>
+    issue.severity === "critical"
+    && NARRATIVE_STRUCTURE_PATTERNS.some((pattern) => normalizedCategories[index]?.includes(pattern) ?? false),
+  ).length;
+  const structuralCriticalCount = blockingIssues.filter((issue, index) =>
+    issue.severity === "critical"
+    && STRUCTURAL_CONTINUITY_PATTERNS.some((pattern) => normalizedCategories[index]?.includes(pattern) ?? false),
+  ).length;
 
   if (hasNarrativeStructureIssue) {
-    if (criticalCount >= 2 || consecutiveFailures >= 4) {
+    if (narrativeCriticalCount >= 2) {
       return {
         mode: "rewrite",
         rationale: "narrative structure drift exceeded safe local repair scope",
@@ -80,19 +88,28 @@ export function resolveRevisionMode(params: {
       };
     }
 
+    if (narrativeCriticalCount === 1) {
+      return {
+        mode: "rework",
+        rationale: "narrative structure drift needs scene-level rework instead of spot-fix",
+        blockingCount: blockingIssues.length,
+        criticalCount,
+      };
+    }
+
     return {
-      mode: "rework",
-      rationale: "narrative structure drift needs scene-level rework instead of spot-fix",
+      mode: "spot-fix",
+      rationale: "narrative structure warning remains locally repairable",
       blockingCount: blockingIssues.length,
       criticalCount,
     };
   }
 
-  if (hasStructuralContinuityIssue) {
-    if (consecutiveFailures >= 4) {
+  if (hasStructuralContinuityIssue && structuralCriticalCount > 0) {
+    if (consecutiveFailures >= 4 && criticalCount >= 2) {
       return {
         mode: "rewrite",
-        rationale: "structural continuity issues persisted across repeated failures",
+        rationale: "structural continuity criticals persisted across repeated failures",
         blockingCount: blockingIssues.length,
         criticalCount,
       };
@@ -100,13 +117,22 @@ export function resolveRevisionMode(params: {
 
     return {
       mode: "rework",
-      rationale: "structural continuity issues exceed safe spot-fix scope",
+      rationale: "structural continuity critical needs scene-level rework instead of spot-fix",
       blockingCount: blockingIssues.length,
       criticalCount,
     };
   }
 
-  if (consecutiveFailures >= 4 && (criticalCount > 0 || blockingIssues.length >= 3)) {
+  if (hasStructuralContinuityIssue) {
+    return {
+      mode: "spot-fix",
+      rationale: "structural continuity warning remains locally repairable",
+      blockingCount: blockingIssues.length,
+      criticalCount,
+    };
+  }
+
+  if (consecutiveFailures >= 4 && (criticalCount > 0 || blockingIssues.length >= 4)) {
     return {
       mode: "rework",
       rationale: "blocking issues persisted across 4+ failures, widening revision scope",

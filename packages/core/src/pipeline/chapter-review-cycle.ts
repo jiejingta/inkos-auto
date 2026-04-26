@@ -39,6 +39,36 @@ function buildTruthSnapshot(
   };
 }
 
+function countActionableIssues(issues: ReadonlyArray<AuditIssue>): number {
+  return issues.filter((issue) => issue.severity === "warning" || issue.severity === "critical").length;
+}
+
+function countCriticalIssues(issues: ReadonlyArray<AuditIssue>): number {
+  return issues.filter((issue) => issue.severity === "critical").length;
+}
+
+function shouldApplyAutoRevision(params: {
+  readonly previousAudit: AuditResult;
+  readonly candidateAudit: AuditResult;
+  readonly previousAITellCount: number;
+  readonly candidateAITellCount: number;
+}): boolean {
+  const previousBlocking = countActionableIssues(params.previousAudit.issues);
+  const candidateBlocking = countActionableIssues(params.candidateAudit.issues);
+  const previousCritical = countCriticalIssues(params.previousAudit.issues);
+  const candidateCritical = countCriticalIssues(params.candidateAudit.issues);
+
+  const didNotWorsen = candidateBlocking <= previousBlocking
+    && candidateCritical <= previousCritical
+    && params.candidateAITellCount <= params.previousAITellCount;
+  const improved = (!params.previousAudit.passed && params.candidateAudit.passed)
+    || candidateBlocking < previousBlocking
+    || candidateCritical < previousCritical
+    || params.candidateAITellCount < params.previousAITellCount;
+
+  return didNotWorsen && improved;
+}
+
 export async function runChapterReviewCycle(params: {
   readonly book: Pick<{ genre: string }, "genre">;
   readonly bookDir: string;
@@ -133,13 +163,19 @@ export async function runChapterReviewCycle(params: {
       candidate: candidateTruth,
     },
   });
+  const settleTruthForContent = async (chapterContent: string): Promise<TruthFileSnapshot> => {
+    if (chapterContent === candidateTruthContent) {
+      return candidateTruth;
+    }
+    const resettled = await params.resettleChapterState(chapterContent);
+    totalUsage = params.addUsage(totalUsage, resettled.tokenUsage);
+    return buildTruthSnapshot(resettled);
+  };
   const refreshCandidateTruth = async (chapterContent: string): Promise<void> => {
     if (chapterContent === candidateTruthContent) {
       return;
     }
-    const resettled = await params.resettleChapterState(chapterContent);
-    totalUsage = params.addUsage(totalUsage, resettled.tokenUsage);
-    candidateTruth = buildTruthSnapshot(resettled);
+    candidateTruth = await settleTruthForContent(chapterContent);
     candidateTruthContent = chapterContent;
   };
 
@@ -226,35 +262,61 @@ export async function runChapterReviewCycle(params: {
       if (reviseOutput.revisedContent.length > 0) {
         const normalizedRevision = await params.normalizeDraftLengthIfNeeded(reviseOutput.revisedContent);
         totalUsage = params.addUsage(totalUsage, normalizedRevision.tokenUsage);
-        postReviseCount = normalizedRevision.wordCount;
-        normalizeApplied = normalizeApplied || normalizedRevision.applied;
 
         const preMarkers = params.analyzeAITells(finalContent);
         const postMarkers = params.analyzeAITells(normalizedRevision.content);
-        if (postMarkers.issues.length <= preMarkers.issues.length) {
-          finalContent = normalizedRevision.content;
-          finalWordCount = normalizedRevision.wordCount;
-          revised = true;
-          params.assertChapterContentNotEmpty(finalContent, "revision");
+        if (postMarkers.issues.length > preMarkers.issues.length) {
+          params.logWarn({
+            zh: "自动修订被拒绝：修后 AI 味问题增加，保留原稿。",
+            en: "Auto-revision rejected: AI-tell issues increased; keeping original draft.",
+          });
+        } else {
+          params.assertChapterContentNotEmpty(normalizedRevision.content, "revision");
+          const revisionTruth = await settleTruthForContent(normalizedRevision.content);
+          const reAudit = await params.auditor.auditChapter(
+            params.bookDir,
+            normalizedRevision.content,
+            params.chapterNumber,
+            params.book.genre,
+            {
+              ...(params.reducedControlInput ?? {}),
+              temperature: 0,
+              truthContext: {
+                candidate: revisionTruth,
+              },
+            },
+          );
+          totalUsage = params.addUsage(totalUsage, reAudit.tokenUsage);
+          const reSensitive = params.analyzeSensitiveWords(normalizedRevision.content);
+          const reHasBlocked = reSensitive.found.some((item) => item.severity === "block");
+          const candidateAudit = params.restoreLostAuditIssues(auditResult, {
+            passed: reHasBlocked ? false : reAudit.passed,
+            issues: [...reAudit.issues, ...postMarkers.issues, ...reSensitive.issues],
+            summary: reAudit.summary,
+          });
+
+          if (shouldApplyAutoRevision({
+            previousAudit: auditResult,
+            candidateAudit,
+            previousAITellCount: preMarkers.issues.length,
+            candidateAITellCount: postMarkers.issues.length,
+          })) {
+            postReviseCount = normalizedRevision.wordCount;
+            normalizeApplied = normalizeApplied || normalizedRevision.applied;
+            candidateTruth = revisionTruth;
+            candidateTruthContent = normalizedRevision.content;
+            auditResult = candidateAudit;
+            finalContent = normalizedRevision.content;
+            finalWordCount = normalizedRevision.wordCount;
+            revised = true;
+          } else {
+            params.logWarn({
+              zh: "自动修订被拒绝：修后审计未改善或阻断问题变多，保留原稿。",
+              en: "Auto-revision rejected: post-revision audit did not improve or introduced more blockers; keeping original draft.",
+            });
+          }
         }
 
-        await refreshCandidateTruth(finalContent);
-        const reAudit = await params.auditor.auditChapter(
-          params.bookDir,
-          finalContent,
-          params.chapterNumber,
-          params.book.genre,
-          buildAuditOptions(0),
-        );
-        totalUsage = params.addUsage(totalUsage, reAudit.tokenUsage);
-        const reAITells = params.analyzeAITells(finalContent);
-        const reSensitive = params.analyzeSensitiveWords(finalContent);
-        const reHasBlocked = reSensitive.found.some((item) => item.severity === "block");
-        auditResult = params.restoreLostAuditIssues(auditResult, {
-          passed: reHasBlocked ? false : reAudit.passed,
-          issues: [...reAudit.issues, ...reAITells.issues, ...reSensitive.issues],
-          summary: reAudit.summary,
-        });
       }
     }
   }

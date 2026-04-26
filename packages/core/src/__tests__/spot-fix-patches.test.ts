@@ -29,6 +29,22 @@ describe("spot-fix patches", () => {
     ]);
   });
 
+  it("preserves malformed empty-target patches so the whole set can be rejected", () => {
+    const patches = parseSpotFixPatches([
+      "=== PATCHES ===",
+      "--- PATCH 1 ---",
+      "TARGET_TEXT:",
+      "",
+      "REPLACEMENT_TEXT:",
+      "新句一。",
+      "--- END PATCH ---",
+    ].join("\n"));
+
+    expect(patches).toEqual<SpotFixPatch[]>([
+      { targetText: "", replacementText: "新句一。" },
+    ]);
+  });
+
   it("applies a uniquely targeted patch while preserving untouched text", () => {
     const original = [
       "门轴轻轻响了一下。",
@@ -70,6 +86,25 @@ describe("spot-fix patches", () => {
     expect(result.applied).toBe(false);
     expect(result.revisedContent).toBe(original);
     expect(result.rejectedReason).toContain("exactly once");
+  });
+
+  it("rejects any patch set containing an empty target", () => {
+    const original = "原句一。\n原句二。";
+
+    const result = applySpotFixPatches(original, [
+      {
+        targetText: "原句一。",
+        replacementText: "新句一。",
+      },
+      {
+        targetText: "",
+        replacementText: "新句二。",
+      },
+    ]);
+
+    expect(result.applied).toBe(false);
+    expect(result.revisedContent).toBe(original);
+    expect(result.rejectedReason).toContain("non-empty TARGET_TEXT");
   });
 
   it("rejects oversized patch sets that touch too much of the chapter", () => {

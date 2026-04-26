@@ -415,7 +415,7 @@ describe("Scheduler", () => {
     expect(approveChapter).toHaveBeenCalledWith("book-1", 1);
   });
 
-  it("escalates repeated structural history failures to rewrite mode", async () => {
+  it("lets reviseDraft choose the fresh strategy for failed history chapters", async () => {
     const scheduler = new Scheduler(createConfig());
     const runtime = scheduler as unknown as {
       consecutiveFailures: Map<string, number>;
@@ -429,7 +429,7 @@ describe("Scheduler", () => {
           bookId: string,
           chapterNumber?: number,
           mode?: string,
-          options?: { consecutiveFailures?: number },
+          options?: { consecutiveFailures?: number; requirePassingRevision?: boolean },
         ) => Promise<unknown>;
         approveChapter: (bookId: string, chapterNumber: number) => Promise<unknown>;
       };
@@ -502,8 +502,8 @@ describe("Scheduler", () => {
     expect(reviseDraft).toHaveBeenCalledWith(
       "book-1",
       1,
-      "rewrite",
-      { consecutiveFailures: 4 },
+      "spot-fix",
+      { consecutiveFailures: 4, requirePassingRevision: true },
     );
     expect(approveChapter).toHaveBeenCalledWith("book-1", 1);
   });

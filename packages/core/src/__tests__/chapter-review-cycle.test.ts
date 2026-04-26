@@ -150,7 +150,7 @@ describe("runChapterReviewCycle", () => {
     expect(result.revised).toBe(true);
   });
 
-  it("drops auto-revision when it increases AI tells and re-audits the original draft", async () => {
+  it("drops auto-revision when it increases AI tells without replacing the draft", async () => {
     const failingAudit = createAuditResult({
       passed: false,
       issues: [{
@@ -162,8 +162,7 @@ describe("runChapterReviewCycle", () => {
       summary: "bad",
     });
     const auditChapter = vi.fn()
-      .mockResolvedValueOnce(failingAudit)
-      .mockResolvedValueOnce(createAuditResult());
+      .mockResolvedValueOnce(failingAudit);
     const reviseChapter = vi.fn().mockResolvedValue({
       revisedContent: "rewritten draft",
       wordCount: 15,
@@ -243,26 +242,110 @@ describe("runChapterReviewCycle", () => {
         },
       },
     );
-    expect(auditChapter).toHaveBeenNthCalledWith(
-      2,
-      "/tmp/book",
-      "original draft",
-      1,
-      "xuanhuan",
-      {
-        temperature: 0,
-        truthContext: {
-          candidate: {
-            currentState: "state: original",
-            ledger: "ledger: original",
-            hooks: "hooks: original",
-          },
-        },
-      },
-    );
+    expect(auditChapter).toHaveBeenCalledTimes(1);
     expect(resettleChapterState).not.toHaveBeenCalled();
     expect(result.finalContent).toBe("original draft");
     expect(result.revised).toBe(false);
+  });
+
+  it("drops auto-revision when post-revision audit introduces more blockers", async () => {
+    const failingAudit = createAuditResult({
+      passed: false,
+      issues: [{
+        severity: "warning",
+        category: "continuity",
+        description: "minor continuity issue",
+        suggestion: "fix it",
+      }],
+      summary: "needs revision",
+    });
+    const worseAudit = createAuditResult({
+      passed: false,
+      issues: [
+        {
+          severity: "critical",
+          category: "timeline",
+          description: "new timeline break",
+          suggestion: "undo it",
+        },
+        {
+          severity: "critical",
+          category: "setting",
+          description: "new setting conflict",
+          suggestion: "undo it",
+        },
+      ],
+      summary: "worse",
+    });
+    const auditChapter = vi.fn()
+      .mockResolvedValueOnce(failingAudit)
+      .mockResolvedValueOnce(worseAudit);
+    const reviseChapter = vi.fn().mockResolvedValue({
+      revisedContent: "worse draft",
+      wordCount: 11,
+      fixedIssues: ["changed"],
+      updatedState: "",
+      updatedLedger: "",
+      updatedHooks: "",
+      tokenUsage: ZERO_USAGE,
+    });
+    const normalizeDraftLengthIfNeeded = vi.fn()
+      .mockResolvedValueOnce({
+        content: "original draft",
+        wordCount: 13,
+        applied: false,
+        tokenUsage: ZERO_USAGE,
+      })
+      .mockResolvedValueOnce({
+        content: "worse draft",
+        wordCount: 11,
+        applied: false,
+        tokenUsage: ZERO_USAGE,
+      });
+    const resettleChapterState = vi.fn().mockResolvedValue(
+      createSettledOutput("worse draft"),
+    );
+
+    const result = await runChapterReviewCycle({
+      book: { genre: "xuanhuan" },
+      bookDir: "/tmp/book",
+      chapterNumber: 1,
+      initialOutput: createInitialOutput({
+        content: "original draft",
+        wordCount: 13,
+        updatedState: "state: original",
+        updatedLedger: "ledger: original",
+        updatedHooks: "hooks: original",
+      }),
+      lengthSpec: LENGTH_SPEC,
+      reducedControlInput: undefined,
+      initialUsage: ZERO_USAGE,
+      resettleChapterState,
+      createReviser: () => ({ reviseChapter }),
+      auditor: { auditChapter },
+      normalizeDraftLengthIfNeeded,
+      assertChapterContentNotEmpty: () => undefined,
+      addUsage: (left, right) => ({
+        promptTokens: left.promptTokens + (right?.promptTokens ?? 0),
+        completionTokens: left.completionTokens + (right?.completionTokens ?? 0),
+        totalTokens: left.totalTokens + (right?.totalTokens ?? 0),
+      }),
+      restoreLostAuditIssues: (_previous, next) => next,
+      analyzeAITells: () => ({ issues: [] as AuditIssue[] }),
+      analyzeSensitiveWords: () => ({ found: [] as Array<{ severity: "warn" | "block" }>, issues: [] as AuditIssue[] }),
+      logWarn: () => undefined,
+      logStage: () => undefined,
+    });
+
+    expect(auditChapter).toHaveBeenCalledTimes(2);
+    expect(resettleChapterState).toHaveBeenCalledWith("worse draft");
+    expect(result.finalContent).toBe("original draft");
+    expect(result.revised).toBe(false);
+    expect(result.auditResult).toMatchObject({
+      passed: false,
+      issues: failingAudit.issues,
+      summary: failingAudit.summary,
+    });
   });
 
   it("auto-revises blocking warning-only audits before persisting failure", async () => {
@@ -342,7 +425,7 @@ describe("runChapterReviewCycle", () => {
       "original draft",
       1,
       [failingAudit.issues[0]],
-      "rework",
+      "spot-fix",
       "xuanhuan",
       {
         lengthSpec: LENGTH_SPEC,

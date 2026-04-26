@@ -367,11 +367,23 @@ ${chapterContent}`;
     if (mode === "spot-fix") {
       const patches = parseSpotFixPatches(extract("PATCHES"));
       const patchResult = applySpotFixPatches(originalChapter, patches);
+      if (!patchResult.applied) {
+        return {
+          revisedContent: "",
+          wordCount: 0,
+          fixedIssues: [],
+          updatedState: extract("UPDATED_STATE") || "(状态卡未更新)",
+          updatedLedger: gp.numericalSystem
+            ? (extract("UPDATED_LEDGER") || "(账本未更新)")
+            : "",
+          updatedHooks: extract("UPDATED_HOOKS") || "(伏笔池未更新)",
+        };
+      }
 
       return {
         revisedContent: patchResult.revisedContent,
         wordCount: patchResult.revisedContent.length,
-        fixedIssues: patchResult.applied ? fixedIssues : [],
+        fixedIssues,
         updatedState: extract("UPDATED_STATE") || "(状态卡未更新)",
         updatedLedger: gp.numericalSystem
           ? (extract("UPDATED_LEDGER") || "(账本未更新)")

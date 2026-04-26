@@ -42,6 +42,14 @@ interface MarkdownBootstrapState {
   readonly durableStoryProgress: number;
 }
 
+const OFFICIAL_TRUTH_CHAPTER_STATUSES = new Set([
+  "audit-passed",
+  "ready-for-review",
+  "approved",
+  "published",
+  "imported",
+]);
+
 export async function bootstrapStructuredStateFromMarkdown(params: {
   readonly bookDir: string;
   readonly fallbackChapter?: number;
@@ -429,7 +437,9 @@ async function loadMarkdownBootstrapState(params: {
     warnings: params.warnings,
   });
   const explicitFallback = normalizeExplicitChapter(params.fallbackChapter);
-  const durableArtifactProgress = await resolveContiguousArtifactChapterProgress(params.bookDir);
+  const durableArtifactProgress = await resolveContiguousArtifactChapterProgress(params.bookDir, {
+    officialTruthOnly: true,
+  });
   const authoritativeProgress = Math.max(explicitFallback, durableArtifactProgress);
   const currentState = await loadMarkdownCurrentState({
     storyDir: params.storyDir,
@@ -470,31 +480,56 @@ async function loadMarkdownCurrentState(params: {
   return parseCurrentStateStateMarkdown(markdown, params.fallbackChapter, params.warnings);
 }
 
-async function resolveContiguousArtifactChapterProgress(bookDir: string): Promise<number> {
-  const chapterNumbers = await loadDurableArtifactChapterNumbers(bookDir);
+async function resolveContiguousArtifactChapterProgress(
+  bookDir: string,
+  options: { readonly officialTruthOnly?: boolean } = {},
+): Promise<number> {
+  const chapterNumbers = await loadDurableArtifactChapterNumbers(bookDir, options);
   return resolveContiguousChapterPrefix(chapterNumbers);
 }
 
-async function loadDurableArtifactChapterNumbers(bookDir: string): Promise<number[]> {
+async function loadDurableArtifactChapterNumbers(
+  bookDir: string,
+  options: { readonly officialTruthOnly?: boolean } = {},
+): Promise<number[]> {
   const chaptersDir = join(bookDir, "chapters");
   const indexPath = join(chaptersDir, "index.json");
-  const [indexChapters, fileChapters] = await Promise.all([
-    readFile(indexPath, "utf-8")
-      .then((raw) => {
-        const parsed = JSON.parse(raw) as Array<{ number?: unknown }>;
-        return parsed
-          .map((entry) => entry?.number)
-          .filter((entry): entry is number => typeof entry === "number" && Number.isInteger(entry) && entry > 0);
-      })
-      .catch(() => [] as number[]),
-    readdir(chaptersDir)
-      .then((entries) => entries.flatMap((entry) => {
-        const match = entry.match(/^(\d+)_/);
-        return match ? [parseInt(match[1]!, 10)] : [];
-      }))
-      .catch(() => [] as number[]),
-  ]);
-  return [...indexChapters, ...fileChapters];
+  const indexChapters = await readFile(indexPath, "utf-8")
+    .then((raw) => {
+      const parsed = JSON.parse(raw) as Array<{ number?: unknown; status?: unknown }>;
+      if (!Array.isArray(parsed) || parsed.length === 0) {
+        return null;
+      }
+
+      const hasStatus = parsed.some((entry) => typeof entry?.status === "string");
+      return parsed
+        .filter((entry) =>
+          !options.officialTruthOnly
+          || !hasStatus
+          || OFFICIAL_TRUTH_CHAPTER_STATUSES.has(String(entry.status)))
+        .map((entry) => entry?.number)
+        .filter((entry): entry is number => typeof entry === "number" && Number.isInteger(entry) && entry > 0);
+    })
+    .catch(() => null);
+
+  if (indexChapters !== null) {
+    if (options.officialTruthOnly) {
+      return indexChapters;
+    }
+    const fileChapters = await loadChapterFileNumbers(chaptersDir);
+    return [...new Set([...indexChapters, ...fileChapters])];
+  }
+
+  return loadChapterFileNumbers(chaptersDir);
+}
+
+async function loadChapterFileNumbers(chaptersDir: string): Promise<number[]> {
+  return readdir(chaptersDir)
+    .then((entries) => entries.flatMap((entry) => {
+      const match = entry.match(/^(\d+)_/);
+      return match ? [parseInt(match[1]!, 10)] : [];
+    }))
+    .catch(() => [] as number[]);
 }
 
 async function pathExists(path: string): Promise<boolean> {

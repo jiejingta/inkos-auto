@@ -102,6 +102,65 @@ describe("applyRuntimeStateDelta", () => {
     expect(result.chapterSummaries.rows.map((row) => row.chapter)).toEqual([11, 12]);
   });
 
+  it("drops stale non-slot current-state facts when a new patch is applied", () => {
+    const result = applyRuntimeStateDelta({
+      snapshot: {
+        manifest: {
+          schemaVersion: 2,
+          language: "zh",
+          lastAppliedChapter: 2,
+          projectionVersion: 1,
+          migrationWarnings: [],
+        },
+        currentState: {
+          chapter: 2,
+          facts: [
+            {
+              subject: "current_state",
+              predicate: "关键情报更新",
+              object: "缇娅明日来访验收",
+              validFromChapter: 2,
+              validUntilChapter: null,
+              sourceChapter: 2,
+            },
+          ],
+        },
+        hooks: { hooks: [] },
+        chapterSummaries: { rows: [] },
+      },
+      delta: RuntimeStateDeltaSchema.parse({
+        chapter: 3,
+        currentStatePatch: {
+          currentLocation: "灰鸦领·东塔客房",
+          protagonistState: "缇娅已提前到达。",
+          currentGoal: "应对提前验收。",
+        },
+        hookOps: {
+          upsert: [],
+          resolve: [],
+          defer: [],
+        },
+        notes: [],
+      }),
+    });
+
+    expect(result.currentState.chapter).toBe(3);
+    expect(result.currentState.facts).toEqual(
+      expect.not.arrayContaining([
+        expect.objectContaining({ predicate: "关键情报更新" }),
+      ]),
+    );
+    expect(result.currentState.facts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          predicate: "主角状态",
+          object: "缇娅已提前到达。",
+          sourceChapter: 3,
+        }),
+      ]),
+    );
+  });
+
   it("rejects duplicate summary rows for the same chapter", () => {
     expect(() =>
       applyRuntimeStateDelta({

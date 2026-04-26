@@ -10,6 +10,8 @@ interface Nav {
   toDashboard: () => void;
 }
 
+export const DAEMON_EVENT_LOG_LIMIT = 500;
+
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" ? value as Record<string, unknown> : {};
 }
@@ -27,6 +29,12 @@ export function formatDaemonEventMessage(message: Pick<SSEMessage, "event" | "da
   return primary !== undefined ? String(primary) : JSON.stringify(data);
 }
 
+export function selectDaemonEvents(messages: ReadonlyArray<SSEMessage>): ReadonlyArray<SSEMessage> {
+  return messages
+    .filter((m) => m.event.startsWith("daemon:") || m.event === "log")
+    .slice(-DAEMON_EVENT_LOG_LIMIT);
+}
+
 export function DaemonControl({ nav, theme, t, sse }: { nav: Nav; theme: Theme; t: TFunction; sse: { messages: ReadonlyArray<SSEMessage> } }) {
   const c = useColors(theme);
   const { data, refetch } = useApi<{ running: boolean }>("/daemon");
@@ -38,9 +46,7 @@ export function DaemonControl({ nav, theme, t, sse }: { nav: Nav; theme: Theme; 
     void refetch();
   }, [refetch, sse.messages]);
 
-  const daemonEvents = sse.messages
-    .filter((m) => m.event.startsWith("daemon:") || m.event === "log")
-    .slice(-20);
+  const daemonEvents = selectDaemonEvents(sse.messages);
 
   const handleStart = async () => {
     setLoading(true);

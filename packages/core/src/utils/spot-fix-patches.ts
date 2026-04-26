@@ -29,7 +29,7 @@ export function parseSpotFixPatches(raw: string): SpotFixPatch[] {
     });
   }
 
-  return patches.filter((patch) => patch.targetText.length > 0);
+  return patches;
 }
 
 export function applySpotFixPatches(
@@ -41,6 +41,16 @@ export function applySpotFixPatches(
       applied: false,
       revisedContent: original,
       rejectedReason: "No valid patches returned.",
+      appliedPatchCount: 0,
+      touchedChars: 0,
+    };
+  }
+
+  if (patches.some((patch) => patch.targetText.trim().length === 0)) {
+    return {
+      applied: false,
+      revisedContent: original,
+      rejectedReason: "Every PATCH must include non-empty TARGET_TEXT.",
       appliedPatchCount: 0,
       touchedChars: 0,
     };

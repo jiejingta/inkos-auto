@@ -851,6 +851,72 @@ describe("StateManager", () => {
       expect(currentState).toContain("\"chapter\": 3");
     });
 
+    it("does not advance official runtime progress from trailing audit-failed chapter artifacts", async () => {
+      const bookId = "runtime-state-audit-failed-tail-book";
+      const bookDir = manager.bookDir(bookId);
+      const storyDir = join(bookDir, "story");
+      const stateDir = join(storyDir, "state");
+      const chaptersDir = join(bookDir, "chapters");
+      const now = "2026-04-24T00:00:00.000Z";
+      await mkdir(chaptersDir, { recursive: true });
+      await mkdir(stateDir, { recursive: true });
+      await manager.saveChapterIndex(bookId, [
+        { number: 1, title: "One", status: "approved", wordCount: 100, createdAt: now, updatedAt: now, auditIssues: [], lengthWarnings: [] },
+        { number: 2, title: "Two", status: "approved", wordCount: 100, createdAt: now, updatedAt: now, auditIssues: [], lengthWarnings: [] },
+        { number: 3, title: "Three", status: "audit-failed", wordCount: 100, createdAt: now, updatedAt: now, auditIssues: ["continuity"], lengthWarnings: [] },
+      ]);
+      await Promise.all([
+        writeFile(join(chaptersDir, "0001_One.md"), "# Chapter 1\n\nBody one.", "utf-8"),
+        writeFile(join(chaptersDir, "0002_Two.md"), "# Chapter 2\n\nBody two.", "utf-8"),
+        writeFile(join(chaptersDir, "0003_Three.md"), "# Chapter 3\n\nFailed body.", "utf-8"),
+        writeFile(
+          join(storyDir, "current_state.md"),
+          [
+            "# Current State",
+            "",
+            "| Field | Value |",
+            "| --- | --- |",
+            "| Current Chapter | 2 |",
+            "| Current Goal | Prepare a clean chapter-three retry |",
+            "",
+          ].join("\n"),
+          "utf-8",
+        ),
+        writeFile(join(storyDir, "pending_hooks.md"), "# Pending Hooks\n", "utf-8"),
+        writeFile(join(storyDir, "chapter_summaries.md"), "| chapter | title |\n| --- | --- |\n| 1 | One |\n| 2 | Two |\n", "utf-8"),
+        writeFile(join(stateDir, "manifest.json"), JSON.stringify({
+          schemaVersion: 2,
+          language: "en",
+          lastAppliedChapter: 3,
+          projectionVersion: 1,
+          migrationWarnings: [],
+        }, null, 2), "utf-8"),
+        writeFile(join(stateDir, "current_state.json"), JSON.stringify({
+          chapter: 2,
+          facts: [{
+            subject: "current_state",
+            predicate: "Current Goal",
+            object: "Prepare a clean chapter-three retry",
+            validFromChapter: 2,
+            validUntilChapter: null,
+            sourceChapter: 2,
+          }],
+        }, null, 2), "utf-8"),
+      ]);
+
+      await manager.ensureRuntimeState(bookId, 2);
+
+      const manifest = JSON.parse(
+        await readFile(join(stateDir, "manifest.json"), "utf-8"),
+      ) as { lastAppliedChapter: number };
+      const currentState = JSON.parse(
+        await readFile(join(stateDir, "current_state.json"), "utf-8"),
+      ) as { chapter: number };
+
+      expect(manifest.lastAppliedChapter).toBe(2);
+      expect(currentState.chapter).toBe(2);
+    });
+
     it("does not treat future hook start chapters as lastAppliedChapter during bootstrap", async () => {
       const bookId = "runtime-state-future-hooks-book";
       const storyDir = join(manager.bookDir(bookId), "story");

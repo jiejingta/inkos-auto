@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatDaemonEventMessage } from "./DaemonControl";
+import { DAEMON_EVENT_LOG_LIMIT, formatDaemonEventMessage, selectDaemonEvents } from "./DaemonControl";
 
 describe("formatDaemonEventMessage", () => {
   it("shows the concrete daemon error instead of only the book id", () => {
@@ -28,5 +28,24 @@ describe("formatDaemonEventMessage", () => {
         bookId: "book-9",
       },
     })).toBe("book-9");
+  });
+});
+
+describe("selectDaemonEvents", () => {
+  it("keeps the newest 500 daemon log rows", () => {
+    const messages = Array.from({ length: DAEMON_EVENT_LOG_LIMIT + 1 }, (_, index) => ({
+      event: index % 2 === 0 ? "log" : "daemon:chapter",
+      data: { message: String(index) },
+      timestamp: index,
+    }));
+
+    const selected = selectDaemonEvents([
+      { event: "write:start", data: {}, timestamp: -1 },
+      ...messages,
+    ]);
+
+    expect(selected).toHaveLength(DAEMON_EVENT_LOG_LIMIT);
+    expect(selected[0]?.timestamp).toBe(1);
+    expect(selected.at(-1)?.timestamp).toBe(DAEMON_EVENT_LOG_LIMIT);
   });
 });

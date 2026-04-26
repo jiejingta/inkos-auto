@@ -5,7 +5,6 @@ import type { BookConfig } from "../models/book.js";
 import type { QualityGates, DetectionConfig } from "../models/project.js";
 import { dispatchWebhookEvent } from "../notify/dispatcher.js";
 import { detectChapter, detectAndRewrite } from "./detection-runner.js";
-import { resolveRevisionMode } from "./revision-strategy.js";
 import type { Logger } from "../utils/logger.js";
 
 export interface SchedulerConfig extends PipelineConfig {
@@ -434,22 +433,14 @@ export class Scheduler {
         continue;
       }
 
-      const consecutiveFailures = this.consecutiveFailures.get(bookId) ?? 0;
-      const revisionStrategy = resolveRevisionMode({
-        requestedMode: "spot-fix",
-        issues: auditResult.issues,
-        consecutiveFailures,
-      });
-      if (revisionStrategy.mode !== "spot-fix") {
-        this.log?.warn(
-          `${bookId} chapter ${blockingChapter.number} revision escalated to ${revisionStrategy.mode}: ${revisionStrategy.rationale}`,
-        );
-      }
       const reviseResult = await this.pipeline.reviseDraft(
         bookId,
         blockingChapter.number,
-        revisionStrategy.mode,
-        { consecutiveFailures },
+        "spot-fix",
+        {
+          consecutiveFailures: this.consecutiveFailures.get(bookId) ?? 0,
+          requirePassingRevision: true,
+        },
       );
       if (reviseResult.status === "ready-for-review") {
         await this.approveChapter(bookId, blockingChapter.number);

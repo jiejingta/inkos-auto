@@ -384,6 +384,73 @@ describe("ReviserAgent", () => {
     }
   });
 
+  it("does not treat malformed spot-fix patches as a safe revision", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-reviser-spotfix-malformed-test-"));
+    const bookDir = join(root, "book");
+    await mkdir(join(bookDir, "story"), { recursive: true });
+
+    const agent = new ReviserAgent({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0, maxTokensCap: null,
+          extra: {},
+        },
+      },
+      model: "test-model",
+      projectRoot: root,
+    });
+
+    vi.spyOn(ReviserAgent.prototype as never, "chat" as never).mockResolvedValue({
+      content: [
+        "=== FIXED_ISSUES ===",
+        "- 尝试修补，但第二个补丁没有目标文本。",
+        "",
+        "=== PATCHES ===",
+        "--- PATCH 1 ---",
+        "TARGET_TEXT:",
+        "林越没有立刻进去。",
+        "REPLACEMENT_TEXT:",
+        "林越先停在门槛外，侧耳听了一息。",
+        "--- END PATCH ---",
+        "--- PATCH 2 ---",
+        "TARGET_TEXT:",
+        "",
+        "REPLACEMENT_TEXT:",
+        "空目标不应被应用。",
+        "--- END PATCH ---",
+        "",
+        "=== UPDATED_STATE ===",
+        "状态卡",
+        "",
+        "=== UPDATED_HOOKS ===",
+        "伏笔池",
+      ].join("\n"),
+      usage: ZERO_USAGE,
+    });
+
+    try {
+      const result = await agent.reviseChapter(
+        bookDir,
+        "林越没有立刻进去。",
+        1,
+        [CRITICAL_ISSUE],
+        "spot-fix",
+        "xuanhuan",
+      );
+
+      expect(result.revisedContent).toBe("");
+      expect(result.wordCount).toBe(0);
+      expect(result.fixedIssues).toEqual([]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("uses selected summary and hook evidence instead of full long-history markdown in governed mode", async () => {
     const root = await mkdtemp(join(tmpdir(), "inkos-reviser-governed-test-"));
     const bookDir = join(root, "book");

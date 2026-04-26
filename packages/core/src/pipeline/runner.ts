@@ -36,13 +36,14 @@ import type { AgentContext } from "../agents/base.js";
 import type { AuditResult, AuditIssue, AuditTruthContext, TruthFileSnapshot } from "../agents/continuity.js";
 import type { RadarResult } from "../agents/radar.js";
 import type { LengthSpec, LengthTelemetry } from "../models/length-governance.js";
+import { ChapterSummariesStateSchema, CurrentStateStateSchema, HooksStateSchema, StateManifestSchema } from "../models/runtime-state.js";
 import type { ContextPackage, RuleStack } from "../models/input-governance.js";
 import { buildLengthSpec, countChapterLength, formatLengthCount, isOutsideHardRange, isOutsideSoftRange, resolveLengthCountingMode, type LengthLanguage } from "../utils/length-metrics.js";
 import { analyzeLongSpanFatigue } from "../utils/long-span-fatigue.js";
 import { validateChapterTitle, validatePostWrite } from "../agents/post-write-validator.js";
 import { loadNarrativeMemorySeed, loadSnapshotCurrentStateFacts } from "../state/runtime-state-store.js";
 import { rewriteStructuredStateFromMarkdown } from "../state/state-bootstrap.js";
-import { renderChapterSummariesProjection } from "../state/state-projections.js";
+import { renderChapterSummariesProjection, renderCurrentStateProjection, renderHooksProjection } from "../state/state-projections.js";
 import { parseChapterSummariesMarkdown, parseMarkdownTableRows } from "../utils/story-markdown.js";
 import { readFile, readdir, writeFile, mkdir, rename, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
@@ -158,6 +159,11 @@ export interface ReviseResult {
   readonly skippedReason?: string;
   readonly lengthWarnings?: ReadonlyArray<string>;
   readonly lengthTelemetry?: LengthTelemetry;
+}
+
+export interface ReviseDraftOptions {
+  readonly consecutiveFailures?: number;
+  readonly requirePassingRevision?: boolean;
 }
 
 export interface TruthFiles {
@@ -481,9 +487,26 @@ export class PipelineRunner {
     }
   }
 
+  private async readOptionalJson<T>(
+    path: string,
+    schema: { parse(value: unknown): T },
+  ): Promise<T | undefined> {
+    const raw = await this.readOptionalText(path);
+    if (!raw?.trim()) {
+      return undefined;
+    }
+
+    try {
+      return schema.parse(JSON.parse(raw));
+    } catch {
+      return undefined;
+    }
+  }
+
   private async loadReviewStageTruthSnapshot(
     bookId: string,
     chapterNumber: number,
+    fallbackLanguage: "zh" | "en" = "zh",
   ): Promise<TruthFileSnapshot | undefined> {
     const stageBookDir = this.state.reviewStageBookDir(bookId, chapterNumber);
     if (!await this.pathExists(stageBookDir)) {
@@ -491,7 +514,20 @@ export class PipelineRunner {
     }
 
     const storyDir = join(stageBookDir, "story");
-    const currentState = await this.readOptionalText(join(storyDir, "current_state.md"));
+    const stateDir = join(storyDir, "state");
+    const manifest = await this.readOptionalJson(join(stateDir, "manifest.json"), StateManifestSchema);
+    const language = manifest?.language ?? fallbackLanguage;
+    const structuredCurrentState = await this.readOptionalJson(
+      join(stateDir, "current_state.json"),
+      CurrentStateStateSchema,
+    );
+    const structuredHooks = await this.readOptionalJson(
+      join(stateDir, "hooks.json"),
+      HooksStateSchema,
+    );
+    const currentState = structuredCurrentState
+      ? renderCurrentStateProjection(structuredCurrentState, language)
+      : await this.readOptionalText(join(storyDir, "current_state.md"));
     if (!currentState?.trim()) {
       return undefined;
     }
@@ -499,8 +535,50 @@ export class PipelineRunner {
     return {
       currentState,
       ledger: await this.readOptionalText(join(storyDir, "particle_ledger.md")),
-      hooks: await this.readOptionalText(join(storyDir, "pending_hooks.md")),
+      hooks: structuredHooks
+        ? renderHooksProjection(structuredHooks, language)
+        : await this.readOptionalText(join(storyDir, "pending_hooks.md")),
     };
+  }
+
+  private async hydrateReviewStageMarkdownFromStructuredState(
+    bookId: string,
+    chapterNumber: number,
+    fallbackLanguage: "zh" | "en",
+  ): Promise<void> {
+    const stageBookDir = this.state.reviewStageBookDir(bookId, chapterNumber);
+    if (!await this.pathExists(stageBookDir)) {
+      return;
+    }
+
+    const storyDir = join(stageBookDir, "story");
+    const stateDir = join(storyDir, "state");
+    const manifest = await this.readOptionalJson(join(stateDir, "manifest.json"), StateManifestSchema);
+    const language = manifest?.language ?? fallbackLanguage;
+    const structuredCurrentState = await this.readOptionalJson(
+      join(stateDir, "current_state.json"),
+      CurrentStateStateSchema,
+    );
+    const structuredHooks = await this.readOptionalJson(join(stateDir, "hooks.json"), HooksStateSchema);
+    const structuredChapterSummaries = await this.readOptionalJson(
+      join(stateDir, "chapter_summaries.json"),
+      ChapterSummariesStateSchema,
+    );
+
+    await mkdir(storyDir, { recursive: true });
+    if (structuredCurrentState) {
+      await writeFile(join(storyDir, "current_state.md"), renderCurrentStateProjection(structuredCurrentState, language), "utf-8");
+    }
+    if (structuredHooks) {
+      await writeFile(join(storyDir, "pending_hooks.md"), renderHooksProjection(structuredHooks, language), "utf-8");
+    }
+    if (structuredChapterSummaries) {
+      await writeFile(
+        join(storyDir, "chapter_summaries.md"),
+        renderChapterSummariesProjection(structuredChapterSummaries, language),
+        "utf-8",
+      );
+    }
   }
 
   private async loadGenreProfile(genre: string): Promise<{ profile: GenreProfile }> {
@@ -857,6 +935,11 @@ export class PipelineRunner {
     const auditor = new ContinuityAuditor(this.agentCtxFor("auditor", bookId));
     const { profile: gp } = await this.loadGenreProfile(book.genre);
     const language = book.language ?? gp.language;
+    const index = await this.state.loadChapterIndex(bookId);
+    const chapterMeta = index.find((chapter) => chapter.number === targetChapter);
+    const stagedTruth = chapterMeta?.status === "audit-failed"
+      ? await this.loadReviewStageTruthSnapshot(bookId, targetChapter, language)
+      : undefined;
     this.logStage(language, {
       zh: `审计第${targetChapter}章`,
       en: `auditing chapter ${targetChapter}`,
@@ -868,11 +951,17 @@ export class PipelineRunner {
       chapterContent: content,
       chapterNumber: targetChapter,
       language,
+      auditOptions: stagedTruth
+        ? {
+            truthContext: {
+              candidate: stagedTruth,
+            },
+          }
+        : undefined,
     });
     const result = evaluation.auditResult;
 
     // Update index with audit result
-    const index = await this.state.loadChapterIndex(bookId);
     const updated = index.map((ch) =>
       ch.number === targetChapter
         ? {
@@ -909,7 +998,7 @@ export class PipelineRunner {
     bookId: string,
     chapterNumber?: number,
     mode: ReviseMode = DEFAULT_REVISE_MODE,
-    options?: { readonly consecutiveFailures?: number },
+    options?: ReviseDraftOptions,
   ): Promise<ReviseResult> {
     const releaseLock = await this.state.acquireBookLock(bookId);
     try {
@@ -948,7 +1037,7 @@ export class PipelineRunner {
           { reuseExistingIntentWhenContextMissing: true },
         );
       const stagedTruth = chapterMeta.status === "audit-failed"
-        ? await this.loadReviewStageTruthSnapshot(bookId, targetChapter)
+        ? await this.loadReviewStageTruthSnapshot(bookId, targetChapter, language)
         : undefined;
       const revisionTruthContext: AuditTruthContext | undefined = stagedTruth
         ? { candidate: stagedTruth }
@@ -993,9 +1082,12 @@ export class PipelineRunner {
       );
 
       const reviser = new ReviserAgent(this.agentCtxFor("reviser", bookId));
+      const revisionIssues = preRevision.revisionBlockingIssues.filter(
+        (issue) => issue.severity === "critical" || issue.severity === "warning",
+      );
       const revisionStrategy = resolveRevisionMode({
         requestedMode: mode,
-        issues: preRevision.revisionBlockingIssues,
+        issues: revisionIssues,
         consecutiveFailures: options?.consecutiveFailures,
       });
       if (revisionStrategy.mode !== mode) {
@@ -1012,7 +1104,7 @@ export class PipelineRunner {
         bookDir,
         content,
         targetChapter,
-        preRevision.auditResult.issues,
+        revisionIssues,
         revisionStrategy.mode,
         book.genre,
         reviseControlInput
@@ -1030,7 +1122,16 @@ export class PipelineRunner {
       );
 
       if (reviseOutput.revisedContent.length === 0) {
-        throw new Error("Reviser returned empty content");
+        return {
+          chapterNumber: targetChapter,
+          wordCount: countChapterLength(content, countingMode),
+          fixedIssues: [],
+          applied: false,
+          status: "unchanged",
+          skippedReason: revisionStrategy.mode === "spot-fix"
+            ? "Spot-fix did not return a safe, uniquely targeted patch; kept original chapter."
+            : "Reviser returned empty content; kept original chapter.",
+        };
       }
       const normalizedRevision = await this.normalizeDraftLengthIfNeeded({
         bookId,
@@ -1119,6 +1220,20 @@ export class PipelineRunner {
           skippedReason: "Manual revision did not improve merged audit or AI-tell metrics; kept original chapter.",
         };
       }
+      if (options?.requirePassingRevision && !effectivePostRevision.auditResult.passed) {
+        this.logWarn(stageLanguage, {
+          zh: `第${targetChapter}章自主修订未通过复审，拒绝落盘并保留原章节。`,
+          en: `Autonomous revision for chapter ${targetChapter} did not pass re-audit; keeping the existing chapter.`,
+        });
+        return {
+          chapterNumber: targetChapter,
+          wordCount: revisionBaseCount,
+          fixedIssues: [],
+          applied: false,
+          status: "unchanged",
+          skippedReason: "Autonomous revision did not pass re-audit; kept original chapter.",
+        };
+      }
       this.logLengthWarnings(lengthWarnings);
 
       const revisedTitle = await this.finalizeChapterTitle({
@@ -1141,7 +1256,8 @@ export class PipelineRunner {
         en: `persisting revision for chapter ${targetChapter}`,
       });
       const reviseLang = book.language ?? gp.language;
-      await new WriterAgent(this.agentCtxFor("writer", bookId)).saveChapterManuscript(
+      const revisionWriter = new WriterAgent(this.agentCtxFor("writer", bookId));
+      await revisionWriter.saveChapterManuscript(
         bookDir,
         {
           chapterNumber: targetChapter,
@@ -1152,17 +1268,7 @@ export class PipelineRunner {
       );
 
       const persistRevisionTruth = async (targetBookDir: string): Promise<void> => {
-        const targetStoryDir = join(targetBookDir, "story");
-        await mkdir(targetStoryDir, { recursive: true });
-        if (settledRevision.updatedState.trim().length > 0) {
-          await writeFile(join(targetStoryDir, "current_state.md"), settledRevision.updatedState, "utf-8");
-        }
-        if (gp.numericalSystem && settledRevision.updatedLedger.trim().length > 0) {
-          await writeFile(join(targetStoryDir, "particle_ledger.md"), settledRevision.updatedLedger, "utf-8");
-        }
-        if (settledRevision.updatedHooks.trim().length > 0) {
-          await writeFile(join(targetStoryDir, "pending_hooks.md"), settledRevision.updatedHooks, "utf-8");
-        }
+        await revisionWriter.savePrimaryTruthFiles(targetBookDir, settledRevision, gp.numericalSystem, reviseLang);
       };
 
       const resolvedRevisionStatus = effectivePostRevision.auditResult.passed ? "ready-for-review" : "audit-failed";
@@ -1172,7 +1278,7 @@ export class PipelineRunner {
           includeSnapshots: true,
         });
         await this.state.discardReviewStage(bookId);
-        await this.syncLegacyStructuredStateFromMarkdown(bookDir, targetChapter);
+        await this.syncLegacyStructuredStateFromMarkdown(bookDir, targetChapter, settledRevision);
         const latestChapter = index.length > 0 ? Math.max(...index.map((chapter) => chapter.number)) : targetChapter;
         if (targetChapter === latestChapter) {
           await this.refreshCurrentFocusAfterProgress(book, bookDir, targetChapter, reviseLang);
@@ -1183,7 +1289,7 @@ export class PipelineRunner {
         await this.syncChapterTitleReferencesAtBookDir(stageBookDir, targetChapter, revisedTitle.title, reviseLang, {
           fallbackStoryRoot: join(bookDir, "story"),
         });
-        await this.syncLegacyStructuredStateFromMarkdown(stageBookDir, targetChapter);
+        await this.syncLegacyStructuredStateFromMarkdown(stageBookDir, targetChapter, settledRevision);
       }
 
       // Update index
@@ -1310,18 +1416,18 @@ export class PipelineRunner {
       const now = new Date().toISOString();
       const latestChapter = Math.max(...index.map((chapter) => chapter.number));
       let refreshCurrentFocus = false;
+      const language = await this.resolveBookLanguage(book);
 
       for (const chapter of pending) {
-        if (chapter.status === "audit-failed") {
-          const promoted = await this.state.promoteReviewStage(bookId, chapter.number);
-          if (promoted) {
-            promotedReviewStages += 1;
-            await this.state.snapshotState(bookId, chapter.number);
-            await this.syncNarrativeMemoryIndex(bookId);
-            await this.syncCurrentStateFactHistory(bookId, chapter.number);
-            if (chapter.number === latestChapter) {
-              refreshCurrentFocus = true;
-            }
+        await this.hydrateReviewStageMarkdownFromStructuredState(bookId, chapter.number, language);
+        const promoted = await this.state.promoteReviewStage(bookId, chapter.number);
+        if (promoted) {
+          promotedReviewStages += 1;
+          await this.state.snapshotState(bookId, chapter.number);
+          await this.syncNarrativeMemoryIndex(bookId);
+          await this.syncCurrentStateFactHistory(bookId, chapter.number);
+          if (chapter.number === latestChapter) {
+            refreshCurrentFocus = true;
           }
         }
 
@@ -1341,7 +1447,7 @@ export class PipelineRunner {
           book,
           bookDir,
           latestChapter,
-          await this.resolveBookLanguage(book),
+          language,
         );
       }
 
@@ -1368,9 +1474,9 @@ export class PipelineRunner {
 
     const chapter = index[targetIndex]!;
     const latestChapter = Math.max(...index.map((entry) => entry.number));
-    const promotedReviewStage = chapter.status === "audit-failed"
-      ? await this.state.promoteReviewStage(bookId, chapterNumber)
-      : false;
+    const language = await this.resolveBookLanguage(book);
+    await this.hydrateReviewStageMarkdownFromStructuredState(bookId, chapterNumber, language);
+    const promotedReviewStage = await this.state.promoteReviewStage(bookId, chapterNumber);
 
     if (promotedReviewStage) {
       await this.state.snapshotState(bookId, chapterNumber);
@@ -1381,7 +1487,7 @@ export class PipelineRunner {
           book,
           bookDir,
           chapterNumber,
-          await this.resolveBookLanguage(book),
+          language,
         );
       }
     }
@@ -3058,7 +3164,7 @@ ${matrix}`;
     };
     readonly writer?: WriterAgent;
   }): Promise<
-    Pick<WriteChapterOutput, "content" | "wordCount" | "updatedState" | "updatedLedger" | "updatedHooks" | "tokenUsage">
+    WriteChapterOutput
   > {
     const writer = params.writer ?? new WriterAgent(this.agentCtxFor("writer", params.bookId));
     return writer.settleChapterState({
@@ -3233,6 +3339,30 @@ ${matrix}`;
         ...auditResult,
         passed: false,
       };
+    }
+
+    if (revised) {
+      const previousBlockingCount = this.countActionableIssues(params.auditResult.issues) + blockingViolations.length;
+      const previousCriticalCount = this.countCriticalIssues(params.auditResult.issues) + blockingViolations.length;
+      const nextBlockingCount = this.countActionableIssues(auditResult.issues);
+      const nextCriticalCount = this.countCriticalIssues(auditResult.issues);
+      const localViolationsImproved = postViolations.length < blockingViolations.length;
+      const auditDidNotWorsen = nextBlockingCount <= previousBlockingCount
+        && nextCriticalCount <= previousCriticalCount;
+
+      if (!localViolationsImproved || !auditDidNotWorsen) {
+        this.logWarn(params.language, {
+          zh: "最终本地 spot-fix 被拒绝：修后本地错误未减少或审计阻断项变多，保留修补前正文。",
+          en: "Final local spot-fix rejected: local errors did not decrease or audit blockers increased; keeping pre-fix content.",
+        });
+        return {
+          content: params.chapterContent,
+          wordCount: params.chapterWordCount,
+          revised: false,
+          auditResult: params.auditResult,
+          tokenUsage: totalUsage,
+        };
+      }
     }
 
     return {
@@ -3805,6 +3935,21 @@ ${matrix}`;
       chapterNumber: params.chapterNumber,
     });
 
+    if (!normalized.applied) {
+      if (normalized.warning) {
+        this.logWarn(this.languageFromLengthSpec(params.lengthSpec), {
+          zh: `字数归一化被拒绝：第${params.chapterNumber}章保留原文（${writerCount}）。${normalized.warning}`,
+          en: `Length normalization rejected for chapter ${params.chapterNumber}; keeping original (${writerCount}). ${normalized.warning}`,
+        });
+      }
+      return {
+        content: params.chapterContent,
+        wordCount: writerCount,
+        applied: false,
+        tokenUsage: normalized.tokenUsage,
+      };
+    }
+
     // Safety net: if normalizer output is less than 25% of original, it was too destructive.
     // Reject and keep original content.
     if (normalized.finalCount < writerCount * 0.25) {
@@ -4210,6 +4355,14 @@ ${matrix}`;
     for (const warning of lengthWarnings) {
       this.config.logger?.warn(warning);
     }
+  }
+
+  private countActionableIssues(issues: ReadonlyArray<AuditIssue>): number {
+    return issues.filter((issue) => issue.severity === "warning" || issue.severity === "critical").length;
+  }
+
+  private countCriticalIssues(issues: ReadonlyArray<AuditIssue>): number {
+    return issues.filter((issue) => issue.severity === "critical").length;
   }
 
   private restoreLostAuditIssues(previous: AuditResult, next: AuditResult): AuditResult {

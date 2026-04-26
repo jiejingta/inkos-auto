@@ -41,7 +41,7 @@ describe("LengthNormalizerAgent", () => {
   it("compresses a long draft while preserving required markers", async () => {
     const agent = createAgent();
     const chatSpy = vi.spyOn(BaseAgent.prototype as never, "chat").mockResolvedValue({
-      content: "压缩后的正文。".repeat(8) + "[[KEEP_ME]]",
+      content: "压缩后的正文。".repeat(30) + "[[KEEP_ME]]",
       usage: ZERO_USAGE,
     });
     const lengthSpec = LengthSpecSchema.parse({
@@ -74,7 +74,7 @@ describe("LengthNormalizerAgent", () => {
   it("expands a short draft without inserting forbidden markers", async () => {
     const agent = createAgent();
     const chatSpy = vi.spyOn(BaseAgent.prototype as never, "chat").mockResolvedValue({
-      content: "扩写后的正文，补足细节和过渡，但不引入禁词。",
+      content: "扩写后的正文，补足细节和过渡，但不引入禁词。".repeat(8),
       usage: ZERO_USAGE,
     });
     const lengthSpec = LengthSpecSchema.parse({
@@ -128,19 +128,96 @@ describe("LengthNormalizerAgent", () => {
     });
 
     expect(chatSpy).toHaveBeenCalledTimes(1);
-    expect(result.applied).toBe(true);
+    expect(result.applied).toBe(false);
     expect(result.mode).toBe("compress");
-    expect(result.warning).toContain("outside");
+    expect(result.normalizedContent).toBe(draft);
+    expect(result.warning).toContain("rejected");
+  });
+
+  it("rejects one-pass output that exits the hard range or moves farther from target", async () => {
+    const agent = createAgent();
+    const chatSpy = vi.spyOn(BaseAgent.prototype as never, "chat")
+      .mockResolvedValueOnce({
+        content: "乙".repeat(2617),
+        usage: ZERO_USAGE,
+      })
+      .mockResolvedValueOnce({
+        content: "丙".repeat(5501),
+        usage: ZERO_USAGE,
+      });
+    const lengthSpec = LengthSpecSchema.parse({
+      target: 3600,
+      softMin: 3240,
+      softMax: 3960,
+      hardMin: 2746,
+      hardMax: 4454,
+      countingMode: "zh_chars",
+      normalizeMode: "compress",
+    });
+    const slightlyLongDraft = "甲".repeat(3990);
+    const shortDraft = "丁".repeat(2617);
+
+    const compressedTooFar = await agent.normalizeChapter({
+      chapterContent: slightlyLongDraft,
+      lengthSpec,
+    });
+    const expandedTooFar = await agent.normalizeChapter({
+      chapterContent: shortDraft,
+      lengthSpec: {
+        ...lengthSpec,
+        normalizeMode: "expand",
+      },
+    });
+
+    expect(chatSpy).toHaveBeenCalledTimes(2);
+    expect(compressedTooFar.applied).toBe(false);
+    expect(compressedTooFar.normalizedContent).toBe(slightlyLongDraft);
+    expect(compressedTooFar.finalCount).toBe(3990);
+    expect(compressedTooFar.warning).toContain("rejected");
+    expect(expandedTooFar.applied).toBe(false);
+    expect(expandedTooFar.normalizedContent).toBe(shortDraft);
+    expect(expandedTooFar.finalCount).toBe(2617);
+    expect(expandedTooFar.warning).toContain("rejected");
+  });
+
+  it("rejects hard-range misses even when they move closer to target", async () => {
+    const agent = createAgent();
+    const chatSpy = vi.spyOn(BaseAgent.prototype as never, "chat").mockResolvedValue({
+      content: "乙".repeat(2461),
+      usage: ZERO_USAGE,
+    });
+    const lengthSpec = LengthSpecSchema.parse({
+      target: 3500,
+      softMin: 3023,
+      softMax: 3977,
+      hardMin: 2546,
+      hardMax: 4454,
+      countingMode: "zh_chars",
+      normalizeMode: "compress",
+    });
+    const overlongDraft = "甲".repeat(5208);
+
+    const result = await agent.normalizeChapter({
+      chapterContent: overlongDraft,
+      lengthSpec,
+    });
+
+    expect(chatSpy).toHaveBeenCalledTimes(1);
+    expect(result.applied).toBe(false);
+    expect(result.normalizedContent).toBe(overlongDraft);
+    expect(result.finalCount).toBe(5208);
+    expect(result.warning).toContain("outside the hard range");
   });
 
   it("strips explanatory wrappers from malformed normalizer output", async () => {
     const agent = createAgent();
+    const normalizedProse = "压缩后的正文。".repeat(25) + "[[KEEP_ME]]";
     const chatSpy = vi.spyOn(BaseAgent.prototype as never, "chat").mockResolvedValue({
       content: [
         "我先压缩一下正文。",
         "",
         "```markdown",
-        "压缩后的正文。[[KEEP_ME]]",
+        normalizedProse,
         "```",
       ].join("\n"),
       usage: ZERO_USAGE,
@@ -164,7 +241,7 @@ describe("LengthNormalizerAgent", () => {
     });
 
     expect(chatSpy).toHaveBeenCalledTimes(1);
-    expect(result.normalizedContent).toBe("压缩后的正文。[[KEEP_ME]]");
+    expect(result.normalizedContent).toBe(normalizedProse);
     expect(result.normalizedContent).not.toContain("我先压缩一下正文");
     expect(result.normalizedContent).not.toContain("```");
   });
@@ -200,7 +277,7 @@ describe("LengthNormalizerAgent", () => {
 
   it("preserves legitimate Chinese prose that starts with '我先'", async () => {
     const agent = createAgent();
-    const prose = "我先回去了，明天再说。\n风从窗缝里灌进来。";
+    const prose = `我先回去了，明天再说。\n${"风从窗缝里灌进来。".repeat(28)}`;
     const chatSpy = vi.spyOn(BaseAgent.prototype as never, "chat").mockResolvedValue({
       content: prose,
       usage: ZERO_USAGE,
@@ -227,7 +304,7 @@ describe("LengthNormalizerAgent", () => {
 
   it("preserves legitimate English prose that starts with 'I will'", async () => {
     const agent = createAgent();
-    const prose = "I will wait here until dawn.\nThe shutters rattled in the wind.";
+    const prose = "I will wait here until dawn. The shutters rattled in the wind. ".repeat(20).trim();
     const chatSpy = vi.spyOn(BaseAgent.prototype as never, "chat").mockResolvedValue({
       content: prose,
       usage: ZERO_USAGE,

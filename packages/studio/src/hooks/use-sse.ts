@@ -6,6 +6,8 @@ export interface SSEMessage {
   readonly timestamp: number;
 }
 
+export const STUDIO_SSE_MESSAGE_LIMIT = 1000;
+
 export const STUDIO_SSE_EVENTS = [
   "book:creating",
   "book:created",
@@ -53,6 +55,14 @@ export const STUDIO_SSE_EVENTS = [
   "ping",
 ] as const;
 
+export function appendSSEMessage(
+  messages: ReadonlyArray<SSEMessage>,
+  message: SSEMessage,
+  limit = STUDIO_SSE_MESSAGE_LIMIT,
+): ReadonlyArray<SSEMessage> {
+  return [...messages.slice(-(limit - 1)), message];
+}
+
 export function useSSE(url = "/api/events") {
   const [messages, setMessages] = useState<ReadonlyArray<SSEMessage>>([]);
   const [connected, setConnected] = useState(false);
@@ -68,7 +78,7 @@ export function useSSE(url = "/api/events") {
     const handleEvent = (e: MessageEvent) => {
       try {
         const data = e.data ? JSON.parse(e.data) : null;
-        setMessages((prev) => [...prev.slice(-99), { event: e.type, data, timestamp: Date.now() }]);
+        setMessages((prev) => appendSSEMessage(prev, { event: e.type, data, timestamp: Date.now() }));
       } catch {
         // ignore parse errors
       }

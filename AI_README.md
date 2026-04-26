@@ -13,6 +13,7 @@
 - 根目录：
   - `README.md` / `README.en.md` / `README.ja.md`：产品说明。
   - `CHANGELOG.md`：版本变更。
+  - `INKOS_NEXT_PLAN.md`：新项目核心能力提炼评审稿；这是规划文档，不代表当前 InkOS 已实现。
   - `test-project/inkos.json`：最小示例配置。手改时保持单个顶层 `daemon` 对象；若只配置部分 `daemon` 字段，schema 会自动补齐默认 `schedule`。
 - `packages/core`：真正的业务内核，包含写作、审计、修订、状态落盘、守护调度。
 - `packages/cli`：命令行入口，`inkos up/down/write/audit/revise/review` 都从这里接入核心包。
@@ -76,11 +77,17 @@
 
 - 审计问题现在统一落盘为 `"[severity] category: description"` 格式，便于统计、重复警告判定和后续排查。
 - `write next` 的前向审计现在不再只看磁盘里的旧 `current_state.md`。review cycle 会把本章正文重新 settle 后的候选 truth 一并送进 auditor，并在 prompt 里显式区分“官方章前 truth”和“候选章后 truth”，避免把章末状态误当成章初状态。
-- 手动 `reviseDraft` 修订 `audit-failed` 章节时，会优先读取 `.review-staging/chapter-XXXX/story/*` 里的候选 truth 作为章后真相，再做修订前审计；没有 staged truth 时才退回只读正式 `story/*`。
+- 手动 `auditDraft` / `reviseDraft` 处理 `audit-failed` 章节时，会优先读取 `.review-staging/chapter-XXXX/story/state/*.json` 的结构化候选 truth 并投影成审计上下文；没有结构化文件时才退回 staged Markdown，再没有 staged truth 时才只读正式 `story/*`。
 - `write next` 的审计失败后，不再只对 `critical` 自动修；只要是阻断性 `warning` / `critical`，都会尝试进入一次自动修订。
-- 自动修订不再永远死锁在 `spot-fix`：如果命中 `大纲偏离检测`、`读者期待管理`、世界规则漂移、时间线矛盾、角色动机/关系连续性断裂等结构性问题，会自动升级到 `rework`；若同一章连续失败已到 4 次，或同时出现多个结构性 `critical`，会直接升级到 `rewrite`。
+- 自动修订不再永远死锁在 `spot-fix`，但升级条件保持保守：结构性 `warning` 仍先走局部修补；单个结构性 `critical` 才升级到 `rework`；多个叙事结构 `critical`，或连续失败后仍存在多个结构性 `critical`，才升级到 `rewrite`。
+- 连续失败次数只负责扩大“当前仍然结构性失败”的修订范围；如果最新审计已经收敛到少量局部 warning（如个别数据不一致、措辞归属、过渡补句），仍保持 `spot-fix`，避免把小补丁误升级成整章重写。
+- 守护进程处理历史 `audit-failed` 章节时，不再把第一次补审得到的升级模式硬传给 `reviseDraft`。`reviseDraft` 会基于自己刚刚重审得到的最新问题重新决定 `spot-fix` / `rework` / `rewrite`，避免“旧审计说要重构、最新审计只剩小 warning”时仍强行大改。
+- `write next` 内联自动修订现在有退化门禁：修后会先重新 settle 候选 truth 并复审，只有阻断项 / critical / AI 味没有变多且至少一项变好时，才接纳修订稿；否则保留原稿，避免“越修订错误越多”。守护进程在清理历史 `audit-failed` 章节时更严格：修订稿必须真正通过复审才会落盘，否则保留当前章节与 staging，防止失败稿一轮轮覆盖基底。
+- 手动 `reviseDraft` / 自动重审修订只把 `warning` / `critical` 阻断项交给 Reviser。`info` 级建议仍会记录在审计结果里，但不会驱动自动改稿，避免模型追逐可选优化而污染正文。
 - 多模型路由里，运行时实际识别的章节审计和修订键名是 `auditor` 与 `reviser`。无人值守场景推荐把两者拆开：`auditor` 用更严格、更稳定的审计模型，`reviser` 用更强的长文改写模型。
 - `writer` 的全局写作规则（核心规则、硬性禁令、文风/书规）现在也会注入给 `reviser` 与 `length-normalizer`，不再只有 `writer` 独享完整写作护栏。
+- `length-normalizer` 仍然只做单次归一化，但现在会拒绝“越修越坏”的输出：只要结果跑出 hard range，或仍在 soft range 外且比原文离目标更远，就保留原文并写 warning。
+- `spot-fix` 现在必须返回可唯一命中的非空 `TARGET_TEXT`。只要补丁集中出现空目标、无法唯一命中、或触碰范围过大，整组补丁都会被视为不安全，不再把原文误当作“已修订成功”。
 
 ### 2.3 提示词现在可集中查看和项目级覆盖
 
@@ -131,6 +138,7 @@ override 的持久化位置：
 - Studio 的“日志”页现在分成两个标签：
   - `流程日志`：读取 `/api/logs` → `inkos.log`
   - `AI 原文`：读取 `/api/ai-logs` → `inkos-ai.log`
+- Studio 的“守护进程”页事件日志来自 `/api/events` 实时事件流；当前页面最多展示最近 500 条 `daemon:*` / `log` 事件。前端 SSE 缓存保留最近 1000 条总事件，用来支撑守护页的 500 行展示。
 
 当前已经接入 raw trace 的主要路径：
 
@@ -172,8 +180,11 @@ override 的持久化位置：
 - Reviser / Auditor 现在共享一份“多章连续性包”：默认会带 `N-1` 全文、若存在则带 `N+1` 开头片段，再附上 `N-3..N+1` 的章节摘要轨迹。目的不是只修上一章衔接，而是同时防止把已存在后文的事实回写坏。
 - Reviser 在自动修订和手动修订时也会收到 truth context：正式 `story/*` 是“章前官方真相”，候选 settled truth 或 staged truth 是“章后修订目标”。提示词会明确要求模型不要把候选章后状态当成章节开头事实。
 - 只要正文在审计链路里被改过（spot-fix / rewrite / rework / 最后一轮本地阻断修补），runner 都会先对“改后的正文”重新 settle truth，再进入下一轮 audit 或持久化，避免正文和候选 state/hooks/ledger 半同步。
+- 结构化 runtime state 的官方进度只吃已经能进入正式 truth 链的章节状态（`audit-passed` / `ready-for-review` / `approved` / `published` / `imported`）。`audit-failed` 章节正文即使已经有文件，也不会把正式 `story/state/manifest.json` 推进到失败章，避免下一轮 settle delta 误判为“章节倒退”。守护进程自动修历史失败章时，未通过复审的修订稿不会覆盖章节正文或重写 `.review-staging`。
+- 审计失败章节如果经 `auditDraft` 复审变成 `ready-for-review`，批准时仍会提升 `.review-staging` 中的候选 truth；提升前会先用结构化 `story/state/*.json` 反渲染 staged Markdown，避免把过期 Markdown 状态批准进正式 `story/*`。
+- `currentStatePatch` 现在按“本章最新状态卡”处理：保留未被本章 patch 覆盖的核心槽位，但会清掉旧的非槽位 `## 其他状态` 事实，避免上一轮候选状态里的临时情报继续污染下一轮审计。
 - Studio 的 Truth Files 页面保存后，不再只是覆盖 `story/*.md` 文件；现在会按文件类型触发本地零额外模型调用的后续同步，例如叙事记忆索引、结构化状态镜像、`current_state` 事实历史和最新章节快照。
-- 最终正文在落盘前会再跑一轮本地阻断校验：如果修订后又引入了“第X章”元叙事、角色讨论自己处在第几章、禁用句式等硬错误，会触发一次额外的 spot-fix，并重新合并审计结果，避免这类错误直接漏进正式章节。
+- 最终正文在落盘前会再跑一轮本地阻断校验：如果修订后又引入了“第X章”元叙事、角色讨论自己处在第几章、禁用句式等硬错误，会触发一次额外的 spot-fix，并重新合并审计结果；若这个末端 spot-fix 没有减少本地错误或导致审计阻断项变多，会被拒绝并保留修补前正文。
 - 章节正文文件在落盘前会清洗顶部残留 heading。无论是写新章、修订章节还是批量重命名，都会先剥掉正文里残留的旧标题，再统一写入新的正式标题，避免出现“双标题”开头。
 
 ### 3.2 守护调度
@@ -209,10 +220,18 @@ override 的持久化位置：
   - `inkos up` 的自动推进规则在这里。
 - `packages/core/src/pipeline/runner.ts`
   - 单章完整流水线、手动 `auditDraft` / `reviseDraft` / `writeNextChapter` 的主入口；同时负责“已批准章节但 truth files 落后”的写前自愈、历史摘要/情绪弧线缺口回填、`current_focus.md` 自动滚动、`particle_ledger.md` 的失管检测/低调用量回填、正文变化后的 truth 重结算、Truth Files 手改后的本地同步，以及 Studio/后续 CLI 共用的 `rejectChapter()` 回退恢复逻辑。
+- `packages/core/src/state/state-bootstrap.ts`
+  - legacy markdown truth 到结构化 runtime state 的引导逻辑。注意这里区分“下一章编号进度”和“官方 truth 进度”：前者可看所有连续章节文件，后者不会把 `audit-failed` 当作已落盘真相。
+- `packages/core/src/state/state-reducer.ts`
+  - 结构化 runtime delta 的归并逻辑。`currentStatePatch` 会替换本章状态卡核心槽位，并清理旧的非槽位当前状态事实，避免 staged truth 的 Markdown 投影残留过期情报。
 - `packages/core/src/utils/chapter-continuity-pack.ts`
   - 多章连续性上下文装配器。给 auditor / reviser 统一提供上一章全文、下一章开头片段和邻近章节摘要轨迹。
+- `packages/core/src/agents/length-normalizer.ts`
+  - 单次字数归一化 agent。会拒绝跑出 hard range 或比原文更偏离目标的模型输出，并让 runner 保留原文。
 - `packages/core/src/utils/length-metrics.ts`
   - 章节长度区间的计算入口。现在会优先读取项目配置里的 `lengthGovernance.range.softRatio / hardRatio`，默认值仍保持旧版区间。
+- `packages/core/src/utils/spot-fix-patches.ts`
+  - `spot-fix` 局部补丁解析和应用器。空 `TARGET_TEXT`、非唯一命中、过大修改面都会整组拒绝。
 - `packages/core/src/pipeline/chapter-persistence.ts`
   - chapter index 写入格式，以及 `ready-for-review` / `audit-failed` / `state-degraded` 三种落盘分流。
 - `packages/core/src/agents/title-refiner.ts`
@@ -237,6 +256,10 @@ override 的持久化位置：
   - 原始 LLM 请求/响应日志的统一追加器；负责把 request/response/error 写进项目根目录 `inkos-ai.log`。
 - `packages/studio/src/pages/PromptManager.tsx`
   - 提示词工作台页面：查看源码片段、编辑 override。
+- `packages/studio/src/pages/DaemonControl.tsx`
+  - 守护进程控制页；事件日志最多展示最近 500 条 `daemon:*` / `log` 事件。
+- `packages/studio/src/hooks/use-sse.ts`
+  - Studio 实时事件订阅；前端缓存最近 1000 条 SSE 事件。
 - `packages/studio/src/api/server.ts`
   - `/api/project/prompts` 的读写接口；章节 approve / approve-all 已改走 core 审批流程；Truth Files 保存后会调用 core 的 truth-edit 同步入口；`/api/logs` / `/api/ai-logs` 分别暴露流程日志和 AI 原文日志。
 - `packages/cli/src/commands/studio.ts`

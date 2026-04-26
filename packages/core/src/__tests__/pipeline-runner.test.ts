@@ -1893,7 +1893,7 @@ describe("PipelineRunner", () => {
     }
   });
 
-  it("keeps the last actionable audit issues when re-audit returns failed with no issues", async () => {
+  it("keeps the last actionable audit issues and rejects unproven auto-revision when re-audit returns failed with no issues", async () => {
     const { root, runner, state, bookId } = await createRunnerFixture({
       inputGovernanceMode: "legacy",
     });
@@ -1960,8 +1960,8 @@ describe("PipelineRunner", () => {
         `[critical] ${CRITICAL_ISSUE.category}: ${CRITICAL_ISSUE.description}`,
       ]);
       await expect(readFile(join(storyDir, "current_state.md"), "utf-8")).resolves.toBe(officialState.trimEnd());
-      await expect(readFile(join(stageStoryDir, "current_state.md"), "utf-8")).resolves.toBe("analyzed state");
-      await expect(readFile(join(stageStoryDir, "pending_hooks.md"), "utf-8")).resolves.toBe("analyzed hooks");
+      await expect(readFile(join(stageStoryDir, "current_state.md"), "utf-8")).resolves.toBe("writer state");
+      await expect(readFile(join(stageStoryDir, "pending_hooks.md"), "utf-8")).resolves.toBe("writer hooks");
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -2877,6 +2877,58 @@ describe("PipelineRunner", () => {
     await expect(stat(join(storyDir, "snapshots", "1", "current_state.md"))).resolves.toBeTruthy();
     await expect(stat(state.reviewStageRoot(bookId))).rejects.toThrow();
 
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("promotes staged truth during approve-all even after a failed chapter is re-audited to ready", async () => {
+    const { root, runner, state, bookId } = await createRunnerFixture();
+    const storyDir = join(state.bookDir(bookId), "story");
+    const now = "2026-03-19T00:00:00.000Z";
+    await Promise.all([
+      writeFile(join(storyDir, "current_state.md"), createStateCard({
+        chapter: 0,
+        location: "Old official location",
+        protagonistState: "Old official state.",
+        goal: "Old official goal.",
+        conflict: "Old official conflict.",
+      }), "utf-8"),
+      writeFile(join(storyDir, "pending_hooks.md"), "# Pending Hooks\n", "utf-8"),
+      state.saveChapterIndex(bookId, [{
+        number: 1,
+        title: "Pending Approval",
+        status: "ready-for-review" as ChapterMeta["status"],
+        wordCount: 1234,
+        createdAt: now,
+        updatedAt: now,
+        auditIssues: [],
+        lengthWarnings: [],
+      }]),
+      writeFile(join(state.bookDir(bookId), "chapters", "0001_Pending_Approval.md"), "# 第1章 Pending Approval\n\nbody", "utf-8"),
+    ]);
+    const stageBookDir = await state.resetReviewStage(bookId, 1);
+    const stageStoryDir = join(stageBookDir, "story");
+    await mkdir(stageStoryDir, { recursive: true });
+    await Promise.all([
+      writeFile(join(stageStoryDir, "current_state.md"), createStateCard({
+        chapter: 1,
+        location: "Staged ready location",
+        protagonistState: "Staged ready truth should be approved.",
+        goal: "Promote the staged state.",
+        conflict: "Approval must not skip staging after re-audit.",
+      }), "utf-8"),
+      writeFile(join(stageStoryDir, "pending_hooks.md"), "# Pending Hooks\n| staged-ready-hook | open |\n", "utf-8"),
+    ]);
+
+    const result = await runner.approveAllPendingChapters(bookId);
+    const savedIndex = await state.loadChapterIndex(bookId);
+
+    expect(result.approvedCount).toBe(1);
+    expect(result.promotedReviewStages).toBe(1);
+    expect(savedIndex[0]?.status).toBe("approved");
+    await expect(readFile(join(storyDir, "current_state.md"), "utf-8"))
+      .resolves.toContain("Staged ready truth should be approved.");
+    await expect(readFile(join(storyDir, "pending_hooks.md"), "utf-8"))
+      .resolves.toContain("staged-ready-hook");
     await rm(root, { recursive: true, force: true });
   });
 
@@ -4935,18 +4987,238 @@ describe("PipelineRunner", () => {
       const savedIndex = await state.loadChapterIndex(bookId);
 
       expect(reviseChapter).toHaveBeenCalledTimes(1);
-      expect(reviseChapter.mock.calls[0]?.[3]).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({ category: "节奏" }),
-          expect.objectContaining({ category: "列表式结构" }),
-        ]),
-      );
+      expect(reviseChapter.mock.calls[0]?.[3]).toEqual([
+        expect.objectContaining({ category: "节奏" }),
+      ]);
       expect(result.applied).toBe(false);
       expect(result.status).toBe("unchanged");
       expect(result.skippedReason).toContain("did not improve");
       expect(savedChapter).toContain(originalBody);
       expect(savedChapter).not.toContain("修订后收束更利落");
       expect(savedIndex[0]?.status).toBe("audit-failed");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects autonomous revisions that improve but still fail re-audit", async () => {
+    const { root, runner, state, bookId } = await createRunnerFixture();
+    const storyDir = join(state.bookDir(bookId), "story");
+    const chaptersDir = join(state.bookDir(bookId), "chapters");
+    const originalBody = "林越在门边停住，听见墙后有水声。";
+    const revisedBody = "林越在门边停住，听见墙后水声短促了一下。";
+
+    await Promise.all([
+      writeFile(join(chaptersDir, "0001_Test_Chapter.md"), `# 第1章 Test Chapter\n\n${originalBody}`, "utf-8"),
+      writeFile(join(storyDir, "current_state.md"), createStateCard({
+        chapter: 1,
+        location: "Ashen ferry crossing",
+        protagonistState: "Lin Yue is still checking the sealed door.",
+        goal: "Find the vanished mentor.",
+        conflict: "The mentor debt is still personal.",
+      }), "utf-8"),
+      writeFile(join(storyDir, "pending_hooks.md"), "# Pending Hooks\n", "utf-8"),
+    ]);
+    await state.saveChapterIndex(bookId, [{
+      number: 1,
+      title: "Test Chapter",
+      status: "audit-failed",
+      wordCount: originalBody.length,
+      createdAt: "2026-03-19T00:00:00.000Z",
+      updatedAt: "2026-03-19T00:00:00.000Z",
+      auditIssues: [],
+      lengthWarnings: [],
+    }]);
+
+    vi.spyOn(ContinuityAuditor.prototype, "auditChapter")
+      .mockResolvedValueOnce(
+        createAuditResult({
+          passed: false,
+          issues: [
+            {
+              severity: "warning",
+              category: "节奏",
+              description: "结尾解释略多。",
+              suggestion: "压缩一行解释。",
+            },
+            {
+              severity: "warning",
+              category: "设定冲突",
+              description: "水声来源不清。",
+              suggestion: "补一句来源。",
+            },
+          ],
+          summary: "needs revision",
+        }),
+      )
+      .mockResolvedValueOnce(
+        createAuditResult({
+          passed: false,
+          issues: [{
+            severity: "warning",
+            category: "设定冲突",
+            description: "水声来源仍不够清楚。",
+            suggestion: "补一句来源。",
+          }],
+          summary: "improved but still blocked",
+        }),
+      );
+    vi.spyOn(ReviserAgent.prototype, "reviseChapter").mockResolvedValue(
+      createReviseOutput({
+        revisedContent: revisedBody,
+        wordCount: revisedBody.length,
+        fixedIssues: ["- 压缩了结尾解释。"],
+      }),
+    );
+
+    try {
+      const result = await runner.reviseDraft(bookId, 1, "spot-fix", { requirePassingRevision: true });
+      const savedChapter = await readFile(join(chaptersDir, "0001_Test_Chapter.md"), "utf-8");
+      const savedIndex = await state.loadChapterIndex(bookId);
+
+      expect(result.applied).toBe(false);
+      expect(result.status).toBe("unchanged");
+      expect(result.skippedReason).toContain("did not pass re-audit");
+      expect(savedChapter).toContain(originalBody);
+      expect(savedChapter).not.toContain(revisedBody);
+      expect(savedIndex[0]?.status).toBe("audit-failed");
+      await expect(stat(join(state.bookDir(bookId), ".review-staging"))).rejects.toThrow();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps the original chapter when a non-spot revision returns empty content", async () => {
+    const { root, runner, state, bookId } = await createRunnerFixture();
+    const storyDir = join(state.bookDir(bookId), "story");
+    const chaptersDir = join(state.bookDir(bookId), "chapters");
+    const originalBody = "林越在门边停住，听见墙后有水声。";
+
+    await Promise.all([
+      writeFile(join(chaptersDir, "0001_Test_Chapter.md"), `# 第1章 Test Chapter\n\n${originalBody}`, "utf-8"),
+      writeFile(join(storyDir, "current_state.md"), createStateCard({
+        chapter: 1,
+        location: "Ashen ferry crossing",
+        protagonistState: "Lin Yue is still checking the sealed door.",
+        goal: "Find the vanished mentor.",
+        conflict: "The mentor debt is still personal.",
+      }), "utf-8"),
+      writeFile(join(storyDir, "pending_hooks.md"), "# Pending Hooks\n", "utf-8"),
+    ]);
+    await state.saveChapterIndex(bookId, [{
+      number: 1,
+      title: "Test Chapter",
+      status: "audit-failed",
+      wordCount: originalBody.length,
+      createdAt: "2026-03-19T00:00:00.000Z",
+      updatedAt: "2026-03-19T00:00:00.000Z",
+      auditIssues: [],
+      lengthWarnings: [],
+    }]);
+
+    vi.spyOn(ContinuityAuditor.prototype, "auditChapter").mockResolvedValue(
+      createAuditResult({
+        passed: false,
+        issues: [{
+          severity: "critical",
+          category: "大纲偏离检测",
+          description: "章节跳过了计划节点。",
+          suggestion: "重构场景。",
+        }],
+        summary: "needs rework",
+      }),
+    );
+    vi.spyOn(ReviserAgent.prototype, "reviseChapter").mockResolvedValue(
+      createReviseOutput({
+        revisedContent: "",
+        wordCount: 0,
+        fixedIssues: [],
+      }),
+    );
+
+    try {
+      const result = await runner.reviseDraft(bookId, 1, "rework");
+      const savedChapter = await readFile(join(chaptersDir, "0001_Test_Chapter.md"), "utf-8");
+
+      expect(result.applied).toBe(false);
+      expect(result.status).toBe("unchanged");
+      expect(result.skippedReason).toContain("empty content");
+      expect(savedChapter).toContain(originalBody);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not send info-only audit notes into manual revise", async () => {
+    const { root, runner, state, bookId } = await createRunnerFixture();
+    const storyDir = join(state.bookDir(bookId), "story");
+    const chaptersDir = join(state.bookDir(bookId), "chapters");
+    const originalBody = "林越推门进去，先看见柜台后那盏没关的灯。";
+
+    await Promise.all([
+      writeFile(join(chaptersDir, "0001_Test_Chapter.md"), `# 第1章 Test Chapter\n\n${originalBody}`, "utf-8"),
+      writeFile(join(storyDir, "current_state.md"), createStateCard({
+        chapter: 1,
+        location: "Ashen ferry crossing",
+        protagonistState: "Lin Yue still hides the oath token.",
+        goal: "Find the vanished mentor.",
+        conflict: "The mentor debt is still personal.",
+      }), "utf-8"),
+      writeFile(join(storyDir, "pending_hooks.md"), "# Pending Hooks\n", "utf-8"),
+    ]);
+    await state.saveChapterIndex(bookId, [{
+      number: 1,
+      title: "Test Chapter",
+      status: "audit-failed",
+      wordCount: originalBody.length,
+      createdAt: "2026-03-19T00:00:00.000Z",
+      updatedAt: "2026-03-19T00:00:00.000Z",
+      auditIssues: [],
+      lengthWarnings: [],
+    }]);
+
+    vi.spyOn(ContinuityAuditor.prototype, "auditChapter")
+      .mockResolvedValueOnce(
+        createAuditResult({
+          passed: false,
+          issues: [
+            {
+              severity: "warning",
+              category: "设定冲突",
+              description: "道具来源不清。",
+              suggestion: "补一句来源。",
+            },
+            {
+              severity: "info",
+              category: "节奏检查",
+              description: "可稍微加强段尾余味。",
+              suggestion: "可选优化。",
+            },
+          ],
+          summary: "needs revision",
+        }),
+      )
+      .mockResolvedValueOnce(
+        createAuditResult({
+          passed: true,
+          issues: [],
+          summary: "clean",
+        }),
+      );
+    const reviseChapter = vi.spyOn(ReviserAgent.prototype, "reviseChapter").mockResolvedValue(
+      createReviseOutput({
+        revisedContent: `${originalBody}\n\n他确认灯下那枚铜扣来自失踪导师的外衣。`,
+        wordCount: `${originalBody}\n\n他确认灯下那枚铜扣来自失踪导师的外衣。`.length,
+        fixedIssues: ["- 补清了道具来源。"],
+      }),
+    );
+
+    try {
+      await runner.reviseDraft(bookId, 1);
+
+      expect(reviseChapter.mock.calls[0]?.[3]).toEqual([
+        expect.objectContaining({ category: "设定冲突" }),
+      ]);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -5076,23 +5348,76 @@ describe("PipelineRunner", () => {
     ]);
     const stageBookDir = await state.resetReviewStage(bookId, 2);
     const stageStoryDir = join(stageBookDir, "story");
-    await mkdir(stageStoryDir, { recursive: true });
+    const stageStateDir = join(stageStoryDir, "state");
+    await mkdir(stageStateDir, { recursive: true });
     await Promise.all([
       writeFile(join(stageStoryDir, "current_state.md"), createStateCard({
         chapter: 2,
-        location: "East annexe corridor",
-        protagonistState: "Taryn is already at the annexe door in the failed draft.",
-        goal: "Open the annexe before the cart clears the court.",
-        conflict: "A forged key has turned lawful access into a trap.",
+        location: "STALE MARKDOWN TRUTH",
+        protagonistState: "This stale markdown state should not reach the auditor.",
+        goal: "Open the annexe from an obsolete staging snapshot.",
+        conflict: "A stale markdown conflict should not reach the auditor.",
       }), "utf-8"),
-      writeFile(join(stageStoryDir, "pending_hooks.md"), "# Pending Hooks\n| annexe-key | open |\n", "utf-8"),
+      writeFile(join(stageStoryDir, "pending_hooks.md"), "# Pending Hooks\n| stale-markdown-hook | open |\n", "utf-8"),
+      writeFile(join(stageStateDir, "manifest.json"), JSON.stringify({
+        schemaVersion: 2,
+        language: "en",
+        lastAppliedChapter: 2,
+        projectionVersion: 1,
+        migrationWarnings: [],
+      }, null, 2), "utf-8"),
+      writeFile(join(stageStateDir, "current_state.json"), JSON.stringify({
+        chapter: 2,
+        facts: [
+          {
+            subject: "protagonist",
+            predicate: "Current Location",
+            object: "STRUCTURED STAGED TRUTH",
+            validFromChapter: 2,
+            validUntilChapter: null,
+            sourceChapter: 2,
+          },
+          {
+            subject: "protagonist",
+            predicate: "Protagonist State",
+            object: "Taryn is already at the annexe door in the failed draft.",
+            validFromChapter: 2,
+            validUntilChapter: null,
+            sourceChapter: 2,
+          },
+        ],
+      }, null, 2), "utf-8"),
+      writeFile(join(stageStateDir, "hooks.json"), JSON.stringify({
+        hooks: [
+          {
+            hookId: "structured-stage-hook",
+            startChapter: 2,
+            type: "access",
+            status: "progressing",
+            lastAdvancedChapter: 2,
+            expectedPayoff: "Open the annexe before the cart clears the court.",
+            notes: "Structured staged hook should win over markdown.",
+          },
+        ],
+      }, null, 2), "utf-8"),
     ]);
 
     const auditChapter = vi.spyOn(ContinuityAuditor.prototype, "auditChapter")
       .mockImplementation(async (_bookDir, _chapterContent, _chapterNumber, _genre, options) => {
-        const stagedState = (options as { truthContext?: { candidate?: { currentState?: string } } } | undefined)
-          ?.truthContext?.candidate?.currentState;
+        const candidate = (options as {
+          truthContext?: {
+            candidate?: {
+              currentState?: string;
+              hooks?: string;
+            };
+          };
+        } | undefined)?.truthContext?.candidate;
+        const stagedState = candidate?.currentState;
         expect(stagedState).toContain("| Current Chapter | 2 |");
+        expect(stagedState).toContain("STRUCTURED STAGED TRUTH");
+        expect(stagedState).not.toContain("STALE MARKDOWN TRUTH");
+        expect(candidate?.hooks).toContain("structured-stage-hook");
+        expect(candidate?.hooks).not.toContain("stale-markdown-hook");
         return createAuditResult({ passed: true, issues: [], summary: "clean" });
       });
 
@@ -5102,6 +5427,142 @@ describe("PipelineRunner", () => {
       expect(auditChapter).toHaveBeenCalledTimes(1);
       expect(result.applied).toBe(false);
       expect(result.status).toBe("unchanged");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("uses staged truth when auditing an audit-failed chapter directly", async () => {
+    const { root, runner, state, bookId } = await createRunnerFixture();
+    const bookDir = state.bookDir(bookId);
+    const storyDir = join(bookDir, "story");
+    const chaptersDir = join(bookDir, "chapters");
+    const originalBody = "Taryn waited at the annexe door.";
+
+    await Promise.all([
+      writeFile(join(chaptersDir, "0001_First.md"), "# Chapter 1: First\n\nOpening chapter.", "utf-8"),
+      writeFile(join(chaptersDir, "0002_Test_Chapter.md"), `# Chapter 2: Test Chapter\n\n${originalBody}`, "utf-8"),
+      writeFile(join(storyDir, "current_state.md"), createStateCard({
+        chapter: 1,
+        location: "Orsden archive lower hall",
+        protagonistState: "Taryn is still below the annexe.",
+        goal: "Reach the annexe.",
+        conflict: "The archive is already compromised.",
+      }), "utf-8"),
+      writeFile(join(storyDir, "pending_hooks.md"), "# Pending Hooks\n", "utf-8"),
+    ]);
+    await state.saveChapterIndex(bookId, [
+      {
+        number: 1,
+        title: "First",
+        status: "ready-for-review",
+        wordCount: countChapterLength("Opening chapter.", "en_words"),
+        createdAt: "2026-03-19T00:00:00.000Z",
+        updatedAt: "2026-03-19T00:00:00.000Z",
+        auditIssues: [],
+        lengthWarnings: [],
+      },
+      {
+        number: 2,
+        title: "Test Chapter",
+        status: "audit-failed",
+        wordCount: countChapterLength(originalBody, "en_words"),
+        createdAt: "2026-03-19T00:00:00.000Z",
+        updatedAt: "2026-03-19T00:00:00.000Z",
+        auditIssues: [],
+        lengthWarnings: [],
+      },
+    ]);
+    const stageBookDir = await state.resetReviewStage(bookId, 2);
+    const stageStoryDir = join(stageBookDir, "story");
+    const stageStateDir = join(stageStoryDir, "state");
+    await mkdir(stageStateDir, { recursive: true });
+    await Promise.all([
+      writeFile(join(stageStoryDir, "current_state.md"), createStateCard({
+        chapter: 2,
+        location: "STALE MARKDOWN TRUTH",
+        protagonistState: "This stale markdown state should not be promoted.",
+        goal: "Open the annexe from an obsolete staging snapshot.",
+        conflict: "A stale markdown conflict should not be promoted.",
+      }), "utf-8"),
+      writeFile(join(stageStoryDir, "pending_hooks.md"), "# Pending Hooks\n| stale-markdown-hook | open |\n", "utf-8"),
+      writeFile(join(stageStateDir, "manifest.json"), JSON.stringify({
+        schemaVersion: 2,
+        language: "en",
+        lastAppliedChapter: 2,
+        projectionVersion: 1,
+        migrationWarnings: [],
+      }, null, 2), "utf-8"),
+      writeFile(join(stageStateDir, "current_state.json"), JSON.stringify({
+        chapter: 2,
+        facts: [
+          {
+            subject: "protagonist",
+            predicate: "Current Location",
+            object: "STRUCTURED STAGED TRUTH",
+            validFromChapter: 2,
+            validUntilChapter: null,
+            sourceChapter: 2,
+          },
+          {
+            subject: "protagonist",
+            predicate: "Protagonist State",
+            object: "Taryn is already at the annexe door in the failed draft.",
+            validFromChapter: 2,
+            validUntilChapter: null,
+            sourceChapter: 2,
+          },
+        ],
+      }, null, 2), "utf-8"),
+      writeFile(join(stageStateDir, "hooks.json"), JSON.stringify({
+        hooks: [
+          {
+            hookId: "structured-stage-hook",
+            startChapter: 2,
+            type: "access",
+            status: "progressing",
+            lastAdvancedChapter: 2,
+            expectedPayoff: "Open the annexe before the cart clears the court.",
+            notes: "Structured staged hook should be promoted.",
+          },
+        ],
+      }, null, 2), "utf-8"),
+    ]);
+
+    const auditChapter = vi.spyOn(ContinuityAuditor.prototype, "auditChapter")
+      .mockImplementation(async (_bookDir, _chapterContent, _chapterNumber, _genre, options) => {
+        const candidate = (options as {
+          truthContext?: {
+            candidate?: {
+              currentState?: string;
+              hooks?: string;
+            };
+          };
+        } | undefined)?.truthContext?.candidate;
+        const stagedState = candidate?.currentState;
+        expect(stagedState).toContain("| Current Chapter | 2 |");
+        expect(stagedState).toContain("STRUCTURED STAGED TRUTH");
+        expect(stagedState).not.toContain("STALE MARKDOWN TRUTH");
+        expect(candidate?.hooks).toContain("structured-stage-hook");
+        expect(candidate?.hooks).not.toContain("stale-markdown-hook");
+        return createAuditResult({ passed: true, issues: [], summary: "clean" });
+      });
+
+    try {
+      const result = await runner.auditDraft(bookId, 2);
+
+      expect(auditChapter).toHaveBeenCalledTimes(1);
+      expect(result.passed).toBe(true);
+      const approval = await runner.approveChapter(bookId, 2);
+      expect(approval.promotedReviewStage).toBe(true);
+      await expect(readFile(join(storyDir, "current_state.md"), "utf-8"))
+        .resolves.toContain("STRUCTURED STAGED TRUTH");
+      await expect(readFile(join(storyDir, "current_state.md"), "utf-8"))
+        .resolves.not.toContain("STALE MARKDOWN TRUTH");
+      await expect(readFile(join(storyDir, "pending_hooks.md"), "utf-8"))
+        .resolves.toContain("structured-stage-hook");
+      await expect(readFile(join(storyDir, "pending_hooks.md"), "utf-8"))
+        .resolves.not.toContain("stale-markdown-hook");
     } finally {
       await rm(root, { recursive: true, force: true });
     }
